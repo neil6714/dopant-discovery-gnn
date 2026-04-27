@@ -1,0 +1,4 @@
+mp-api==0.39.5  
+pymatgen==2024.3.1 
+jupyter==1.0.0 
+python-dotenv==1.0.1
