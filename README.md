@@ -1,4 +1,4 @@
-# Autonomous Graph Neural Network for Semiconductor Discovery
+# Autonomous Graph Neural Network for Semiconductor Doping
 
 An end-to-end Active Learning pipeline that accelerates traditional Density Functional Theory (DFT) dopant simulations from 3 days to <0.5 seconds using PyTorch Geometric and Universal Machine Learning Potentials.
 
