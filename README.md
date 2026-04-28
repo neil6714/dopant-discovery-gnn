@@ -33,12 +33,12 @@ The system operates in a closed-loop Active Learning cycle broken into three pha
 dopant-discovery-gnn/
 ├── src/
 │   ├── data_pipeline/
-│   │   ├── 1_extract_base_crystals.py
-│   │   ├── 2_generate_defects.py
-│   │   ├── 3_calculate_energies.py
-│   │   └── 4_structures_to_graphs.py
+│   │   ├── extract_base_crystals.py
+│   │   ├── generate_defects.py
+│   │   ├── calculate_energies.py
+│   │   └── structures_to_graphs.py
 │   └── models/
 │       ├── train_gnn.py
-│       └── 6_active_learning.py
-├── 7_autonomous_lab.py            # Master orchestration script
+│       └── active_learning.py
+├── autonomous_lab.py            # Master orchestration script
 └── requirements.txt
