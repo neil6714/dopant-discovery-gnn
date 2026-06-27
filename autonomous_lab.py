@@ -28,7 +28,7 @@ def run_autonomous_discovery(target_dopant, base_cif="data/raw/SiC_base.cif"):
     hypothesis_path = f"data/processed/SiC_doped_{target_dopant}_HYPOTHESIS.cif"
     base_struct.to(fmt="cif", filename=hypothesis_path)
     
-    # Convert hypothesis to a Math Graph (with a dummy energy of 0.0 for now)
+    # Convert hypothesis to a Math Graph (with a dummy energy of 0.0)
     hypothesis_graph = cif_to_graph(hypothesis_path, energy_label=0.0)
 
     # --- STEP 2: Ask the AI (Active Learning) ---
@@ -39,12 +39,12 @@ def run_autonomous_discovery(target_dopant, base_cif="data/raw/SiC_base.cif"):
     mean_pred, uncertainty = loop.predict_with_uncertainty(hypothesis_graph)
     print(f" -> AI Predicted Energy: {mean_pred:.4f} eV")
     print(f" -> AI Uncertainty: {uncertainty:.4f}")
-
+    # ===================================================================================
     print(" -> Quantifying ensemble regression accuracy across dataset...")
     all_real = []
     all_pred = []
 
-    # Loop through every completed crystal graph currently in your database
+    # Loop through every completed crystal graph currently in the database
     for graph in loop.training_pool:
         if hasattr(graph, 'y') and graph.y is not None:
             # Extract the actual simulation energy stored in the graph label
@@ -55,7 +55,7 @@ def run_autonomous_discovery(target_dopant, base_cif="data/raw/SiC_base.cif"):
             p_mean, _ = loop.predict_with_uncertainty(graph)
             all_pred.append(p_mean)
 
-    # Compute overall statistics if your database has accumulated historical data
+    # Compute overall statistics if the database has accumulated historical data
     if len(all_real) > 1:
         global_mae = mean_absolute_error(all_real, all_pred)
         global_r2 = r2_score(all_real, all_pred)
