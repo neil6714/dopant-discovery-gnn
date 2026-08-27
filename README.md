@@ -161,21 +161,21 @@ The active learning loop uses ensemble disagreement as a measure of model uncert
 
 For a candidate structure, the ensemble produces predictions:
 
-[
-E_1, E_2, ..., E_5
-]
+$$
+[E_1, E_2, \ldots, E_5]
+$$
 
 The prediction uncertainty is estimated using the standard deviation:
 
-[
-\sigma_E = \mathrm{Std}(E_1, E_2, ..., E_5)
-]
+$$
+\sigma_E = \mathrm{Std}(E_1, E_2, \ldots, E_5)
+$$
 
 If:
 
-[
+$$
 \sigma_E > 0.05
-]
+$$
 
 the candidate is considered sufficiently uncertain to trigger a CHGNet evaluation.
 
