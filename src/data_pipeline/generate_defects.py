@@ -50,12 +50,12 @@ if __name__ == "__main__":
         output_prefix="SiC"
     )
     
-    # 2. Dope Gallium Oxide (Replacing one Gallium atom)
+    # 2. Dope gallium nitride (Replacing one Gallium atom)
     generate_doped_structures(
-        base_cif_path="data/raw/Ga2O3_base.cif",
+        base_cif_path="data/raw/GaN_base.cif",
         target_element="Ga",
         dopants=transition_metals,
-        output_prefix="Ga2O3"
+        output_prefix="GaN"
     )
     
     
