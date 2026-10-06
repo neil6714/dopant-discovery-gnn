@@ -1,3 +1,4 @@
+"""Convert processed CIF files and energy labels into graph data."""
 import os
 import pandas as pd
 import torch
