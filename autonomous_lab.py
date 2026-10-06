@@ -3,12 +3,9 @@ import os
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 import torch
 import pandas as pd
-from copy import deepcopy
 from pymatgen.core import Structure
 from chgnet.model.model import CHGNet
-from torch_geometric.data import Data
 from sklearn.metrics import mean_absolute_error, r2_score
-import numpy as np
 
 from src.models.active_learning import ActiveLearningLoop
 from src.data_pipeline.structures_to_graphs import cif_to_graph
@@ -39,8 +36,7 @@ def run_autonomous_discovery(target_dopant, base_cif="data/raw/SiC_base.cif"):
     mean_pred, uncertainty = loop.predict_with_uncertainty(hypothesis_graph)
     print(f" -> AI Predicted Energy: {mean_pred:.4f} eV")
     print(f" -> AI Uncertainty: {uncertainty:.4f}")
-    # ===================================================================================
-    print(" -> Quantifying ensemble regression accuracy across dataset...")
+    print("\n[3/5] Quantifying ensemble regression accuracy across dataset...")
     all_real = []
     all_pred = []
 
@@ -62,15 +58,9 @@ def run_autonomous_discovery(target_dopant, base_cif="data/raw/SiC_base.cif"):
         print(f" GLOBAL AI PERFORMANCE -> MAE: {global_mae:.4f} eV/atom | R²: {global_r2:.4f}")
     else:
         print(" Global Performance -> Add more completed simulations to calculate R².")
-    # =====================================================================
-
-    mean_pred, uncertainty = loop.predict_with_uncertainty(hypothesis_graph)
-    print(f" -> AI Predicted Energy: {mean_pred:.4f} eV")
-    print(f" -> AI Uncertainty: {uncertainty:.4f}")
-    
-    # --- STEP 3: The Decision Gate ---
+    # --- STEP 4: The Decision Gate ---
     if uncertainty > 0.001: 
-        print(f"\n[3/5] Uncertainty threshold exceeded! AI requesting quantum simulation...")
+        print(f"\n[4/5] Uncertainty threshold exceeded! AI requesting quantum simulation...")
         
         # --- STEP 4: The Simulator (CHGNet) ---
         print(f" -> Waking up Universal Potential to calculate ground truth...")
@@ -102,7 +92,7 @@ def run_autonomous_discovery(target_dopant, base_cif="data/raw/SiC_base.cif"):
         print(" -> Dataset updated. The AI is now permanently smarter.")
         
     else:
-        print("\n[3/5] AI is highly confident. No simulation needed. Proceeding to next candidate...")
+        print("\n[4/5] AI is highly confident. No simulation needed. Proceeding to next candidate...")
 
     print("\nAUTONOMOUS DISCOVERY CYCLE COMPLETE")
 
