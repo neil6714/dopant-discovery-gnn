@@ -1,3 +1,4 @@
+"""Create doped SiC and GaN supercells for transition-metal candidates."""
 import os
 from pymatgen.core import Structure
 from copy import deepcopy
