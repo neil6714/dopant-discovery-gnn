@@ -1,3 +1,4 @@
+"""Download base SiC and GaN structures from the Materials Project."""
 import os
 from mp_api.client import MPRester
 from dotenv import load_dotenv
