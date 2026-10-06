@@ -1,27 +1,8 @@
-# Hide my API Keys
-    .env
-    
-    # Hide massive AI Weights and Datasets
-    *.pth
-    *.pt
-    data/graph_data/
-    data/processed/
-    
-    # Hide Python junk
-    __pycache__/
-    ```
-  
-  
-    Make sure your terminal is standing in your main `dopant-discovery-gnn` folder. Run these commands one by one:
-    1. `git init` *(This turns your folder into a Git repository)*
-    2. `git add .` *(This stages all your safe files to be saved)*
-    3. `git commit -m "Initial commit: GNN Active Learning Pipeline"` *(This creates the actual "Save State")*
-  
-  
-    Go back to the empty GitHub repository page you created in Step 1. Look for the section titled **"…or push an existing repository from the command line"**. 
-    Copy the three lines of code they provide, paste them into your VS Code terminal, and press Enter. It will look something like this:
-    ```cmd
-    git remote add origin https://github.com/your-username/dopant-discovery-gnn.git
-    git branch -M main
-    git push -u origin main
-    ```
+.env
+__pycache__/
+*.pyc
+.vscode/
+*.pth
+*.pt
+data/graph_data/
+data/processed/
