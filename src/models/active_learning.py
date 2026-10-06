@@ -1,3 +1,4 @@
+"""Train an ensemble GNN and estimate prediction uncertainty."""
 import random
 import torch_geometric
 import torch
