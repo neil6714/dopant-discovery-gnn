@@ -1,3 +1,4 @@
+"""Train the graph neural network on the generated graph dataset."""
 import os
 import torch
 import torch.nn.functional as F
