@@ -1,41 +1,34 @@
-import os
 import random
+import torch_geometric
 import torch
-import pandas as pd
-from torch_geometric.data import Data
-from copy import deepcopy
 
 from src.models.train_gnn import DopantGNN
 
-from src.data_pipeline.calculate_energies import calculate_energies 
-from chgnet.model.model import CHGNet
 
 class ActiveLearningLoop:
     def __init__(self, initial_data_path, model_save_path):
         self.data_path = initial_data_path
         self.model_save_path = model_save_path
         self.training_pool = torch.load(initial_data_path, weights_only=False)
-        self.models = [] # ensemble of 5 brains
+        self.models = []  # Ensemble of models
         
     def train_ensemble(self, num_models=5, epochs=30):
         """Trains 5 independent GNNs on slightly shuffled data."""
         print(f"\n--- Training Ensemble of {num_models} Models ---")
         self.models = []
         for i in range(num_models):
-            print(f"Training Brain {i+1}/{num_models}...")
+            print(f"Training model {i+1}/{num_models}...")
             model = DopantGNN()
             optimizer = torch.optim.Adam(model.parameters(), lr=0.005)
             criterion = torch.nn.MSELoss()
             
-            # BOOTSTRAPPING
-            # 1. Shuffle the data
+            # Shuffle the data
             random.shuffle(self.training_pool)
-            # 2. Give this specific brain only 80% of the data
+            # Use 80% of the data for this model
             subset_size = int(len(self.training_pool) * 0.8)
             train_subset = self.training_pool[:subset_size]
             
             for epoch in range(epochs):
-                total_loss = 0
                 for data in train_subset: 
                     optimizer.zero_grad()
                     out = model(data.x, data.edge_index, batch=torch.zeros(data.x.size(0), dtype=torch.long))
@@ -45,7 +38,7 @@ class ActiveLearningLoop:
             self.models.append(model)
             
     def predict_with_uncertainty(self, new_graph):
-        """Asks all 5 brains for their prediction and measures disagreement."""
+        """Predicts with the ensemble and measures disagreement."""
         predictions = []
         for model in self.models:
             model.eval() # Set to evaluation mode
@@ -55,11 +48,11 @@ class ActiveLearningLoop:
         
         mean_pred = sum(predictions) / len(predictions)
         
-        # Calculate Variance
+        # Calculate variance
         variance = sum((x - mean_pred) ** 2 for x in predictions) / len(predictions)
         std_dev = variance ** 0.5
         
-        print(f"Raw Brain Guesses: {[round(p, 4) for p in predictions]}") 
+        print(f"Model predictions: {[round(p, 4) for p in predictions]}") 
         
         return mean_pred, std_dev
 
@@ -70,12 +63,12 @@ if __name__ == "__main__":
         model_save_path="models/ensemble_gnn.pth"
     )
     
-    # 1. Train the initial brains
+    # Train the initial models
     loop.train_ensemble()
     
     print("\n--- Simulating Unseen Materials Space ---")
     fake_unseen_candidates = [
-        Data(x=torch.rand(10, 1)*50, edge_index=torch.tensor([[0,1,2,3],[1,2,3,0]]), y=None, name=f"Candidate_{i}") 
+        torch_geometric.data.Data(x=torch.rand(10, 1)*50, edge_index=torch.tensor([[0,1,2,3],[1,2,3,0]]), y=None, name=f"Candidate_{i}") 
         for i in range(10)
     ]
     
