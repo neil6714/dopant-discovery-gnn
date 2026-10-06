@@ -16,4 +16,4 @@ def fetch_base_structure(material_id, name):
 
 if __name__ == "__main__":
     fetch_base_structure("mp-11714", "SiC_base")
-    fetch_base_structure("mp-804", "Ga2O3_base")
+    fetch_base_structure("mp-804", "GaN_base")
