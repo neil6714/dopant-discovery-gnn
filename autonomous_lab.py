@@ -1,3 +1,4 @@
+"""Run the autonomous active learning workflow for a candidate dopant."""
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.dirname(__file__)))
