@@ -1,10 +1,4 @@
-<<<<<<< HEAD
 mp-api==0.39.5  
 pymatgen==2024.3.1 
 jupyter==1.0.0 
-=======
-mp-api==0.39.5  
-pymatgen==2024.3.1 
-jupyter==1.0.0 
->>>>>>> 9b35e9b277055627eac488fa18b6e45caac6a975
 python-dotenv==1.0.1
