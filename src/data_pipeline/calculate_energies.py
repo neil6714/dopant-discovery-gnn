@@ -1,3 +1,4 @@
+"""Evaluate processed structures with CHGNet and write energy labels."""
 import os
 import pandas as pd
 from pymatgen.core import Structure
