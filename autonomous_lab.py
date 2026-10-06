@@ -59,8 +59,9 @@ def run_autonomous_discovery(target_dopant, base_cif="data/raw/SiC_base.cif"):
     else:
         print(" Global Performance -> Add more completed simulations to calculate R².")
     # --- STEP 4: The Decision Gate ---
+    print("\n[4/5] Evaluating uncertainty threshold...")
     if uncertainty > 0.001: 
-        print(f"\n[4/5] Uncertainty threshold exceeded! AI requesting quantum simulation...")
+        print(" -> Uncertainty threshold exceeded. Requesting quantum simulation...")
         
         # --- STEP 4: The Simulator (CHGNet) ---
         print(f" -> Waking up Universal Potential to calculate ground truth...")
@@ -92,7 +93,7 @@ def run_autonomous_discovery(target_dopant, base_cif="data/raw/SiC_base.cif"):
         print(" -> Dataset updated. The AI is now permanently smarter.")
         
     else:
-        print("\n[4/5] AI is highly confident. No simulation needed. Proceeding to next candidate...")
+        print(" -> AI is highly confident. No simulation needed. Proceeding to next candidate...")
 
     print("\nAUTONOMOUS DISCOVERY CYCLE COMPLETE")
 
