@@ -78,7 +78,7 @@ def calculate_energies(processed_dir="data/processed", csv_path="data/dopant_ene
     results = []
 
     if not os.path.exists(processed_dir):
-        print(f"Error: {processed_dir} not found!")
+        print(f"Error: Directory '{processed_dir}' not found.")
         return results
 
     # Sort files
@@ -90,14 +90,14 @@ def calculate_energies(processed_dir="data/processed", csv_path="data/dopant_ene
         try:
             record = evaluate_single_structure(path, csv_path=csv_path, relaxer=relaxer)
             results.append(record)
-            print("Success!")
+            print("Success")
         except Exception as e:
-            print(f"FAILED! Exact Error: {repr(e)}")
+            print(f"Failed: {repr(e)}")
 
     if len(results) > 0:
-        print(f"\nSaved {len(results)} successful calculations to {csv_path}")
+        print(f"\nSaved {len(results)} calculations to {csv_path}")
     else:
-        print("\nCritical Failure: No files were successfully processed.")
+        print("\nError: No files were successfully processed.")
 
     return results
 

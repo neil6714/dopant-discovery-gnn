@@ -115,10 +115,10 @@ def run_autonomous_lab(
             print(f"\n[DECISION GATE] Uncertainty ({pred_std:.4f}) / unvalidated status triggers simulation.")
             print(" -> Requesting quantum simulation (CHGNet StructOptimizer relaxation)...")
 
-            # 4a. Trigger the CHGNet oracle
-            oracle_res = evaluate_single_structure(hyp_path, csv_path=csv_path)
-            real_energy = oracle_res["total_energy"]
-            real_energy_per_atom = oracle_res["energy_per_atom"]
+            # 4a. Execute CHGNet potential simulation and relaxation
+            sim_res = evaluate_single_structure(hyp_path, csv_path=csv_path)
+            real_energy = sim_res["total_energy"]
+            real_energy_per_atom = sim_res["energy_per_atom"]
             error_before = abs(pred_mean - real_energy_per_atom)
 
             print(f" -> SIMULATION COMPLETE:")
@@ -175,8 +175,8 @@ def run_autonomous_lab(
             print("=" * 55)
 
         else:
-            print(f" -> AI is confident (std={pred_std:.4f} <= {uncertainty_threshold}).")
-            print(" -> No quantum simulation required. Candidate accepted.")
+            print(f" -> Uncertainty is within threshold (std={pred_std:.4f} <= {uncertainty_threshold}).")
+            print(" -> No additional simulation required. Candidate evaluation complete.")
 
     print("\nAUTONOMOUS LAB RUN COMPLETE.")
 
