@@ -109,9 +109,10 @@ def run_autonomous_lab(
         print(f" -> AI Predicted Energy:          {pred_mean:.4f} eV/atom")
         print(f" -> Epistemic Uncertainty (std):  {pred_std:.4f} eV/atom")
 
-        # 4. Check uncertainty threshold
-        if pred_std > uncertainty_threshold:
-            print(f"\n[DECISION GATE] Uncertainty ({pred_std:.4f}) > threshold ({uncertainty_threshold}).")
+        # 4. Check uncertainty threshold or unvalidated status
+        is_unvalidated = not os.path.exists(os.path.join(processed_dir, hyp_filename.replace("_HYPOTHESIS.cif", ".cif")))
+        if pred_std > uncertainty_threshold or is_unvalidated:
+            print(f"\n[DECISION GATE] Uncertainty ({pred_std:.4f}) / unvalidated status triggers simulation.")
             print(" -> Requesting quantum simulation (CHGNet StructOptimizer relaxation)...")
 
             # 4a. Trigger the CHGNet oracle
@@ -131,8 +132,9 @@ def run_autonomous_lab(
             shutil.copyfile(hyp_path, validated_path)
             print(f" -> Promoted {hyp_filename} to validated dataset: {validated_filename}")
 
-            # Record validated structure in dopant_energies.csv
+            # Record validated structure in dopant_energies.csv (removing any temporary hypothesis row)
             df = pd.read_csv(csv_path)
+            df = df[df["filename"] != hyp_filename]
             new_record = {
                 "filename": validated_filename,
                 "total_energy": real_energy,

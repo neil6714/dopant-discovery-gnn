@@ -98,13 +98,7 @@ def process_cif_directory(
         cif_path = os.path.join(processed_dir, filename)
 
         # Look up ground-truth energy label
-        y_val = None
-        if filename in energy_map:
-            y_val = energy_map[filename]
-        elif filename.endswith("_HYPOTHESIS.cif"):
-            alt_name = filename.replace("_HYPOTHESIS.cif", ".cif")
-            if alt_name in energy_map:
-                y_val = energy_map[alt_name]
+        y_val = energy_map.get(filename)
 
         # Exclude unvalidated hypotheses from training set
         if filename.endswith("_HYPOTHESIS.cif") and y_val is None:
