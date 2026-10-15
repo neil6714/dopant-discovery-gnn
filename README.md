@@ -1,4 +1,4 @@
-# Dopant Discovery GNN
+# MLIP-guided GNN for dopant screening
 
 A graph neural network pipeline for evaluating transition-metal and actinide dopants in 4H-SiC and GaN with CHGNet universal potential relaxation and energy labels.
 
