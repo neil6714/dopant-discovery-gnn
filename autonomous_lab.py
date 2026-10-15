@@ -1,106 +1,190 @@
-"""Run the autonomous active learning workflow for a candidate dopant."""
-import sys
+"""Run the autonomous active learning workflow for candidate dopants."""
+import glob
 import os
-sys.path.append(os.path.abspath(os.path.dirname(__file__)))
-import torch
+import shutil
+import sys
+import warnings
 import pandas as pd
+import torch
 from pymatgen.core import Structure
-from chgnet.model.model import CHGNet
-from sklearn.metrics import mean_absolute_error, r2_score
 
-from src.models.active_learning import ActiveLearningLoop
-from src.data_pipeline.structures_to_graphs import cif_to_graph
+sys.path.append(os.path.abspath(os.path.dirname(__file__)))
 
-def run_autonomous_discovery(target_dopant, base_cif="data/raw/SiC_base.cif"):
-    print(f"\n STARTING AUTONOMOUS LAB: Investigating {target_dopant}")
-    
-    # --- STEP 1: Generate the Unseen Hypothesis ---
-    print(f"\n[1/5] Generating theoretical structure for {target_dopant}...")
+from src.data_pipeline.calculate_energies import evaluate_single_structure
+from src.data_pipeline.structures_to_graphs import build_graph_from_cif, process_cif_directory
+from src.models.active_learning import ActiveLearningLoop, predict_with_uncertainty
+
+
+def ensure_ensemble(
+    graphs_path="data/graph_data/processed_graphs.pt",
+    models_dir="models",
+    num_models=5,
+    epochs=30,
+):
+    """Ensure a trained 5-model ensemble is ready."""
+    al_loop = ActiveLearningLoop(graphs_path, models_dir)
+    all_exist = all(
+        os.path.exists(os.path.join(models_dir, f"ensemble_model_{i}.pth"))
+        for i in range(num_models)
+    )
+
+    if all_exist:
+        try:
+            from src.models.train_gnn import DopantGNN
+
+            loaded_models = []
+            for i in range(num_models):
+                m = DopantGNN()
+                m.load_state_dict(
+                    torch.load(os.path.join(models_dir, f"ensemble_model_{i}.pth"), weights_only=False)
+                )
+                loaded_models.append(m)
+            al_loop.models = loaded_models
+            return al_loop
+        except Exception:
+            pass
+
+    # Ensure dataset exists before training
+    if not os.path.exists(graphs_path):
+        process_cif_directory(output_path=graphs_path)
+        al_loop = ActiveLearningLoop(graphs_path, models_dir)
+
+    al_loop.train_ensemble(num_models=num_models, epochs=epochs)
+    return al_loop
+
+
+def generate_hypothesis(target_dopant, base_cif="data/raw/SiC_base.cif", output_dir="data/processed"):
+    """Generate an unrelaxed hypothesis structure with a target dopant."""
+    print(f"Generating theoretical hypothesis structure for dopant '{target_dopant}'...")
     base_struct = Structure.from_file(base_cif)
     base_struct.make_supercell([3, 3, 3])
-    
-    replace_index = next(i for i, site in enumerate(base_struct) if site.species.elements[0].symbol == "Si")
+
+    replace_index = next(
+        i for i, site in enumerate(base_struct) if site.species.elements[0].symbol == "Si"
+    )
     base_struct.replace(replace_index, target_dopant)
-    
-    # Save the temporary hypothesis
-    hypothesis_path = f"data/processed/SiC_doped_{target_dopant}_HYPOTHESIS.cif"
+
+    os.makedirs(output_dir, exist_ok=True)
+    hypothesis_path = os.path.join(output_dir, f"SiC_doped_{target_dopant}_HYPOTHESIS.cif")
     base_struct.to(fmt="cif", filename=hypothesis_path)
-    
-    # Convert hypothesis to a Math Graph (with a dummy energy of 0.0)
-    hypothesis_graph = cif_to_graph(hypothesis_path, energy_label=0.0)
+    print(f"Saved hypothesis to {hypothesis_path}")
+    return hypothesis_path
 
-    # --- STEP 2: Ask the AI (Active Learning) ---
-    print("\n[2/5] Consulting GNN Ensemble...")
-    loop = ActiveLearningLoop("data/graph_data/processed_graphs.pt", "models/ensemble_gnn.pth")
-    loop.train_ensemble(num_models=5, epochs=20) # Quick train for the demo
-    
-    mean_pred, uncertainty = loop.predict_with_uncertainty(hypothesis_graph)
-    print(f" -> AI Predicted Energy: {mean_pred:.4f} eV")
-    print(f" -> AI Uncertainty: {uncertainty:.4f}")
-    print("\n[3/5] Quantifying ensemble regression accuracy across dataset...")
-    all_real = []
-    all_pred = []
 
-    # Loop through every completed crystal graph currently in the database
-    for graph in loop.training_pool:
-        if hasattr(graph, 'y') and graph.y is not None:
-            # Extract the actual simulation energy stored in the graph label
-            true_val = graph.y.item() if hasattr(graph.y, "item") else float(graph.y)
-            all_real.append(true_val)
-            
-            # Get the ensemble's average prediction for this specific structure
-            p_mean, _ = loop.predict_with_uncertainty(graph)
-            all_pred.append(p_mean)
+def run_autonomous_lab(
+    processed_dir="data/processed",
+    csv_path="data/dopant_energies.csv",
+    graphs_path="data/graph_data/processed_graphs.pt",
+    models_dir="models",
+    uncertainty_threshold=0.05,
+):
+    """Run closed-loop active learning over candidate hypothesis structures."""
+    print("=" * 65)
+    print(" STARTING AUTONOMOUS LAB: HYPOTHESIS EVALUATION LOOP")
+    print("=" * 65)
 
-    # Compute overall statistics if the database has accumulated historical data
-    if len(all_real) > 1:
-        global_mae = mean_absolute_error(all_real, all_pred)
-        global_r2 = r2_score(all_real, all_pred)
-        print(f" GLOBAL AI PERFORMANCE -> MAE: {global_mae:.4f} eV/atom | R²: {global_r2:.4f}")
-    else:
-        print(" Global Performance -> Add more completed simulations to calculate R².")
-    # --- STEP 4: The Decision Gate ---
-    print("\n[4/5] Evaluating uncertainty threshold...")
-    if uncertainty > 0.001: 
-        print(" -> Uncertainty threshold exceeded. Requesting quantum simulation...")
-        
-        # --- STEP 4: The Simulator (CHGNet) ---
-        print(f" -> Waking up Universal Potential to calculate ground truth...")
-        chgnet_model = CHGNet.load()
-        prediction = chgnet_model.predict_structure(base_struct)
-        
-        # Extract the real energy
-        real_energy = prediction.get('e', prediction.get('energy'))
-        if hasattr(real_energy, "item"): real_energy = real_energy.item()
-        real_energy_per_atom = real_energy / len(base_struct)
-        
-        print(f" -> SIMULATION COMPLETE. True Energy: {real_energy_per_atom:.4f} eV")
-        print(f" -> The AI was off by: {abs(mean_pred - real_energy_per_atom):.4f} eV")
-        
-        # --- STEP 5: Close the Loop (Retrain) ---
-        print("\n[5/5] Closing the loop. Appending new knowledge...")
-        
-        # 1. Update CSV
-        df = pd.read_csv("data/dopant_energies.csv")
-        new_row = pd.DataFrame([{"filename": f"SiC_doped_{target_dopant}.cif", "total_energy": real_energy, "energy_per_atom": real_energy_per_atom}])
-        df = pd.concat([df, new_row], ignore_index=True)
-        df.to_csv("data/dopant_energies.csv", index=False)
-        
-        # 2. Update Graphs
-        real_graph = cif_to_graph(hypothesis_path, energy_label=real_energy_per_atom)
-        loop.training_pool.append(real_graph)
-        torch.save(loop.training_pool, "data/graph_data/processed_graphs.pt")
-        
-        print(" -> Dataset updated. The AI is now permanently smarter.")
-        
-    else:
-        print(" -> AI is highly confident. No simulation needed. Proceeding to next candidate...")
+    # 1. Ensure initial ensemble is trained
+    al_loop = ensure_ensemble(graphs_path=graphs_path, models_dir=models_dir)
 
-    print("\nAUTONOMOUS DISCOVERY CYCLE COMPLETE")
+    # 2. Scan data/processed/*_HYPOTHESIS.cif
+    pattern = os.path.join(processed_dir, "*_HYPOTHESIS.cif")
+    hypothesis_files = sorted(glob.glob(pattern))
+
+    if not hypothesis_files:
+        print(f"No hypothesis files found matching '{pattern}'.")
+        return
+
+    print(f"\nFound {len(hypothesis_files)} candidate hypothesis structure(s):")
+    for hf in hypothesis_files:
+        print(f"  • {os.path.basename(hf)}")
+
+    for hyp_path in hypothesis_files:
+        hyp_filename = os.path.basename(hyp_path)
+        print(f"\n" + "-" * 50)
+        print(f"[ACTIVE LEARNING] Investigating Candidate: {hyp_filename}")
+        print("-" * 50)
+
+        # 3. Query the 5-model ensemble
+        pred_mean, pred_std = predict_with_uncertainty(hyp_path, ensemble_models=al_loop.models)
+        print(f" -> AI Predicted Energy:          {pred_mean:.4f} eV/atom")
+        print(f" -> Epistemic Uncertainty (std):  {pred_std:.4f} eV/atom")
+
+        # 4. Check uncertainty threshold
+        if pred_std > uncertainty_threshold:
+            print(f"\n[DECISION GATE] Uncertainty ({pred_std:.4f}) > threshold ({uncertainty_threshold}).")
+            print(" -> Requesting quantum simulation (CHGNet StructOptimizer relaxation)...")
+
+            # 4a. Trigger the CHGNet oracle
+            oracle_res = evaluate_single_structure(hyp_path, csv_path=csv_path)
+            real_energy = oracle_res["total_energy"]
+            real_energy_per_atom = oracle_res["energy_per_atom"]
+            error_before = abs(pred_mean - real_energy_per_atom)
+
+            print(f" -> SIMULATION COMPLETE:")
+            print(f"    Total Energy:    {real_energy:.4f} eV")
+            print(f"    Energy per atom: {real_energy_per_atom:.4f} eV/atom")
+            print(f"    AI Error Before: {error_before:.4f} eV/atom")
+
+            # 4b. Promote structure from hypothesis to validated dataset
+            validated_filename = hyp_filename.replace("_HYPOTHESIS.cif", ".cif")
+            validated_path = os.path.join(processed_dir, validated_filename)
+            shutil.copyfile(hyp_path, validated_path)
+            print(f" -> Promoted {hyp_filename} to validated dataset: {validated_filename}")
+
+            # Record validated structure in dopant_energies.csv
+            df = pd.read_csv(csv_path)
+            new_record = {
+                "filename": validated_filename,
+                "total_energy": real_energy,
+                "energy_per_atom": real_energy_per_atom,
+            }
+            df = pd.concat([df, pd.DataFrame([new_record])], ignore_index=True)
+            df = df.drop_duplicates(subset=["filename"], keep="last")
+            df.to_csv(csv_path, index=False)
+            print(f" -> Recorded {validated_filename} in {csv_path}")
+
+            # 4c. Rebuild graph dataset
+            print(" -> Rebuilding graph dataset...")
+            process_cif_directory(
+                processed_dir=processed_dir,
+                csv_path=csv_path,
+                output_path=graphs_path,
+            )
+
+            # 4d. Retrain 5-model ensemble on expanded dataset
+            print(" -> Retraining 5-model GNN ensemble on expanded dataset...")
+            al_loop = ActiveLearningLoop(graphs_path, models_dir)
+            al_loop.train_ensemble(num_models=5, epochs=30)
+
+            # 4e. Re-evaluate (new_mean, new_std) on newly validated structure
+            new_mean, new_std = predict_with_uncertainty(validated_path, ensemble_models=al_loop.models)
+            error_after = abs(new_mean - real_energy_per_atom)
+
+            print("\n" + "=" * 55)
+            print(" CLOSED-LOOP ACTIVE LEARNING SUMMARY")
+            print("=" * 55)
+            print(f" Structure:               {validated_filename}")
+            print(f" Ground Truth Energy:     {real_energy_per_atom:.4f} eV/atom")
+            print(f" Prediction (Before/After): {pred_mean:.4f} -> {new_mean:.4f} eV/atom")
+            print(f" Absolute Error:          {error_before:.4f} -> {error_after:.4f} eV/atom")
+            print(f" Epistemic Uncertainty:   {pred_std:.4f} -> {new_std:.4f} eV/atom")
+            if pred_std > new_std:
+                print(f" Verified Uncertainty Reduction: {(pred_std - new_std):.4f} eV/atom")
+            print("=" * 55)
+
+        else:
+            print(f" -> AI is confident (std={pred_std:.4f} <= {uncertainty_threshold}).")
+            print(" -> No quantum simulation required. Candidate accepted.")
+
+    print("\nAUTONOMOUS LAB RUN COMPLETE.")
+
+
+def run_autonomous_discovery(target_dopant, base_cif="data/raw/SiC_base.cif"):
+    """Workflow entrypoint for discovering a specific candidate dopant."""
+    generate_hypothesis(target_dopant, base_cif=base_cif)
+    run_autonomous_lab()
+
 
 if __name__ == "__main__":
-
-    import warnings
     warnings.filterwarnings("ignore")
-    target_dopant="U"
-    run_autonomous_discovery(target_dopant)
+    run_autonomous_lab()
