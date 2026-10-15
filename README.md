@@ -26,7 +26,7 @@ The workflow consists of three primary stages:
 - `calculate_energies.py`: Relaxes unrelaxed supercells using `StructOptimizer` from `chgnet.model` (`fmax=0.1 eV/Å`) to resolve steric clashes introduced by large dopant radii. It overwrites `data/processed/*.cif` with the relaxed atomic coordinates, computes `energy_per_atom = total_energy / len(final_structure)` from the final trajectory state, and records the results in `data/dopant_energies.csv` with deduplication (`drop_duplicates(subset=["filename"], keep="last")`). It also exposes `evaluate_single_structure(cif_path)` for on-demand potential relaxation and energy evaluation.
 - `structures_to_graphs.py`: Exposes `build_graph_from_cif(cif_path, y_val=None)` and batch-converts verified CIFs into PyTorch Geometric (PyG) graphs.
   - **Node features ($x$):** Normalized atomic numbers ($Z / 100.0$, shape `[num_nodes, 1]`) to prevent gradient instability when evaluating heavy dopants (e.g., Zr, U).
-  - **Edge connectivity and attributes (`edge_index`, `edge_attr`):** Derived from radial neighbor cutoffs ($r \le 5.0$ Å) using inverse distance weights ($1.0 / (\text{distance} + 10^{-5})$).
+  - **Edge connectivity and attributes (`edge_index`, `edge_attr`):** Derived from radial neighbor cutoffs ($r \le 5.0$ Å) using inverse distance weights (`1.0 / (distance + 1e-5)`).
   - **Dataset filtering:** Unvalidated hypothesis structures (`*_HYPOTHESIS.cif`) are excluded from training until ground-truth potential simulation labels are registered.
   - **PyTorch 2.6+ Compatibility:** Safe globals registration and `weights_only=False` handling ensure serialization compatibility.
 
