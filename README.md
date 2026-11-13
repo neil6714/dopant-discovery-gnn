@@ -1,48 +1,75 @@
-# MLIP-guided GNN for dopant screening
+# Dopant formation energy surrogate
 
-A graph neural network pipeline for evaluating transition-metal and actinide dopants in 4H-SiC and GaN with CHGNet universal potential relaxation and energy labels.
+A machine-learned screening pipeline for substitutional transition-metal and actinide dopants in 4H-SiC and GaN using CHGNet relaxations and crystal graph neural networks.
 
 ## Overview
 
-This project generates doped crystal structures, relaxes and evaluates them with CHGNet, converts the atomic geometries into edge-aware graph representations, and trains a graph neural network (GNN) ensemble. The learning target is the relaxed formation energy per atom. The repository includes an active learning loop that quantifies epistemic prediction uncertainty across a bootstrapped ensemble and executes an autonomous closed-loop retraining cycle when candidate uncertainty exceeds a defined threshold.
+This project builds a fast screening surrogate for defect formation energies in wide-bandgap semiconductors. In this pipeline, the training label is the neutral substitutional defect formation energy in eV calculated from CHGNet potential relaxations in the cation-rich limit. Relaxations are performed with fixed lattice parameters (ions relaxed at fixed cell volume), which avoids cell deformation artifacts in supercells while resolving local steric strain.
 
-The two host materials are:
+Input structures given to the graph neural network are unrelaxed substituted supercells. Because unrelaxed geometries are available immediately without running atomistic relaxations, the neural network acts as a rapid pre-screening tool to prioritize candidates before running machine-learned potential or density functional theory calculations.
 
-- 4H-SiC, provided as `SiC_base.cif`
-- GaN, provided as `GaN_base.cif`
+Both symmetry-inequivalent silicon sites in 4H-SiC (Wyckoff positions 2b and 2a) are explicitly generated and distinguished. For GaN, dopants substitute on the single inequivalent gallium site (Wyckoff 2b). The training dopant set spans 25 transition metals across the 3d, 4d, and 5d rows. Uranium is treated strictly as an out-of-distribution candidate and is never included in the training set.
 
-The defect generator models candidate dopants (including transition metals and heavy elements such as Zr and U) by substituting host atoms in the supercell.
+Earlier versions of this repository contained energy scaling inconsistencies and unrelaxed structures in the training label tables. Those legacy files have been moved to `archive/legacy_v0/` with details documented in `archive/legacy_v0/NOTES.md`. The current codebase was developed and tested using Python 3.10.
 
 ## Pipeline
 
-The workflow consists of three primary stages:
+The data pipeline runs through seven sequential steps:
 
-### 1. Structure and Defect Generation
+1. Base crystal extraction (`src.data_pipeline.extract_base_crystals`): downloads primitive unit cells for 4H-SiC (mp-11714) and GaN (mp-804) alongside elemental reference structures from the Materials Project API, recording material identifiers in `data/raw/references/sources.csv`.
+2. Reference relaxation (`src.data_pipeline.relax_references`): optimizes the cell and ionic positions of the host primitive cells and elemental references using CHGNet, saving records to `data/references.csv`.
+3. Defect generation (`src.data_pipeline.generate_defects`): builds 3x3x3 supercells from the relaxed host lattices, substitutes the target cation across all symmetry-inequivalent sites using `SpacegroupAnalyzer`, and writes unrelaxed structures to `data/unrelaxed/` while logging metadata to `data/manifest.csv`.
+4. Energy relaxation (`src.data_pipeline.calculate_energies`): relaxes defect supercells with fixed cell dimensions using CHGNet, writes relaxed structures to `data/relaxed/`, and appends total and per-atom energies to `data/dopant_energies.csv`.
+5. Formation energy calculation (`src.data_pipeline.formation_energy`): evaluates the neutral formation energy in the cation-rich limit ($E_f = E_{\text{doped}} - E_{\text{host\_sc}} + \mu_{\text{cation}} - \mu_{\text{dopant}}$) using the relaxed host supercell energy and elemental chemical potentials, saving results in `data/dopant_energies.csv`.
+6. Graph construction (`src.data_pipeline.structures_to_graphs`): extracts defect-centered local clusters within a 6.0 Angstrom radius, constructs edges within 4.5 Angstroms with 8 Gaussian radial basis function attributes, computes 9-dimensional node features, and attaches target formation energies.
+7. Model training and evaluation (`src.models.train_gnn` and `src.models.evaluate`): trains `DefectGNN` with target standardisation and cosine annealing, and runs cross-validation against baseline models.
 
-`extract_base_crystals.py` fetches the SiC and GaN host structures from the Materials Project API. `generate_defects.py` builds 3x3x3 supercells (216 atoms for SiC, 108 atoms for GaN) and substitutes single host lattice sites with candidate dopants. Processed structures are written as CIF files under `data/processed/`.
+## Usage
 
-### 2. CHGNet Relaxation, Energy Labeling, and Graph Conversion
+Run the pipeline from the repository root:
 
-- `calculate_energies.py`: Relaxes unrelaxed supercells using `StructOptimizer` from `chgnet.model` (`fmax=0.1 eV/Å`) to resolve steric clashes introduced by large dopant radii. It overwrites `data/processed/*.cif` with the relaxed atomic coordinates, computes `energy_per_atom = total_energy / len(final_structure)` from the final trajectory state, and records the results in `data/dopant_energies.csv` with deduplication (`drop_duplicates(subset=["filename"], keep="last")`). It also exposes `evaluate_single_structure(cif_path)` for on-demand potential relaxation and energy evaluation.
-- `structures_to_graphs.py`: Exposes `build_graph_from_cif(cif_path, y_val=None)` and batch-converts verified CIFs into PyTorch Geometric (PyG) graphs.
-  - **Node features ($x$):** Normalized atomic numbers ($Z / 100.0$, shape `[num_nodes, 1]`) to prevent gradient instability when evaluating heavy dopants (e.g., Zr, U).
-  - **Edge connectivity and attributes (`edge_index`, `edge_attr`):** Derived from radial neighbor cutoffs ($r \le 5.0$ Å) using inverse distance weights (`1.0 / (distance + 1e-5)`).
-  - **Dataset filtering:** Unvalidated hypothesis structures (`*_HYPOTHESIS.cif`) are excluded from training until ground-truth potential simulation labels are registered.
-  - **PyTorch 2.6+ Compatibility:** Safe globals registration and `weights_only=False` handling ensure serialization compatibility.
+```bash
+# 1. Download base host structures and elemental references (requires MP_API_KEY)
+python -m src.data_pipeline.extract_base_crystals
 
-### 3. Edge-Aware GNN Training and Closed-Loop Active Learning
+# 2. Relax host primitive cells and elemental references
+python -m src.data_pipeline.relax_references
 
-- `train_gnn.py`: Implements `DopantGNN`, featuring a linear node embedding layer, three distance-weighted `GCNConv` layers consuming edge attributes, global mean pooling, and a 2-layer MLP prediction head. Models are trained using `AdamW` (`lr=1e-3`, `weight_decay=1e-4`) and `SmoothL1Loss()`, saving weights to `models/dopant_gnn.pth`.
-- `active_learning.py`: Defines `ActiveLearningLoop`, which trains a 5-model ensemble (`models/ensemble_model_0.pth` ... `models/ensemble_model_4.pth`) using distinct random seeds and bootstrapped sampling with replacement. Exposes `predict_with_uncertainty(cif_or_graph, ensemble_models)` returning mean prediction and ensemble standard deviation.
-- `autonomous_lab.py`: Executes the autonomous hypothesis evaluation loop:
-  1. Scans candidate hypothesis structures (`data/processed/*_HYPOTHESIS.cif`).
-  2. Queries the 5-model ensemble for predicted formation energy and epistemic uncertainty (`pred_std`).
-  3. When candidate uncertainty exceeds the threshold (`pred_std > 0.05` or candidate is unvalidated):
-     - Executes the CHGNet `StructOptimizer` simulation via `evaluate_single_structure`.
-     - Promotes the structure (`*_HYPOTHESIS.cif` -> `*.cif`) and updates `data/dopant_energies.csv`.
-     - Rebuilds `data/graph_data/processed_graphs.pt`.
-     - Retrains the 5-model ensemble on the updated training pool.
-     - Re-evaluates prediction and uncertainty reduction on the validated material.
+# 3. Generate unrelaxed substituted defect supercells
+python -m src.data_pipeline.generate_defects
+
+# 4. Perform CHGNet relaxation on defect supercells
+python -m src.data_pipeline.calculate_energies
+
+# 5. Compute formation energies in the cation-rich limit
+python -m src.data_pipeline.formation_energy
+
+# 6. Convert unrelaxed crystal structures into graph datasets
+python -m src.data_pipeline.structures_to_graphs
+
+# 7. Train DefectGNN model
+python -m src.models.train_gnn
+
+# 8. Run cross-validation benchmarks
+python -m src.models.evaluate
+
+# 9. Run active learning pool benchmark
+python -m src.models.active_learning --benchmark
+
+# 10. Run live screening loop in dry-run mode
+python autonomous_lab.py --dry-run
+```
+
+## Active Learning
+
+Active learning is implemented in two complementary workflows:
+
+1. Simulated oracle pool benchmark (`src.models.active_learning --benchmark`): evaluates active acquisition on the labeled dataset. Starting from a small initial seed set, it compares greedy acquisition by maximum ensemble standard deviation against random acquisition. After each batch, the ensemble is retrained and evaluated on the untouched remainder pool. Results are saved to `results/al_benchmark.csv`, `results/al_learning_curve.png`, and `results/uncertainty_calibration.csv` (recording the Spearman rank correlation between ensemble standard deviation and prediction error).
+2. Live screening loop (`autonomous_lab.py`): evaluates active candidates from `data/candidates/` tracked in `data/manifest.csv`. In each round, candidates are ranked by ensemble standard deviation in eV. Structures exceeding the screening cutoff from configuration are relaxed with CHGNet. Out-of-sample prediction errors are recorded to `results/live_al_log.csv` before retraining the ensemble, and candidate status in the manifest is updated without copying or renaming files.
+
+## Results
+
+to be filled after the first full run
 
 ## Repository Structure
 
@@ -54,42 +81,76 @@ dopant-discovery-gnn/
 ├── README.md
 ├── autonomous_lab.py
 ├── requirements.txt
+├── archive/
+│   └── legacy_v0/
+│       ├── NOTES.md
+│       ├── dopant_energies.csv
+│       ├── dopant_gnn.pth
+│       ├── processed_graphs.pt
+│       └── processed_unrelaxed_site0/
 ├── data/
 │   ├── README.md
+│   ├── candidates/
 │   ├── dopant_energies.csv
+│   ├── manifest.csv
+│   ├── references.csv
 │   ├── graph_data/
 │   │   └── processed_graphs.pt
-│   ├── processed/
-│   │   ├── GaN_doped_*.cif
-│   │   └── SiC_doped_*.cif
-│   └── raw/
-│       ├── GaN_base.cif
-│       └── SiC_base.cif
+│   ├── raw/
+│   │   ├── GaN_base.cif
+│   │   ├── SiC_base.cif
+│   │   └── references/
+│   ├── relaxed/
+│   │   ├── hosts/
+│   │   └── references/
+│   └── unrelaxed/
 ├── models/
-│   ├── dopant_gnn.pth
-│   ├── ensemble_model_0.pth
-│   └── ...
-└── src/
-    ├── data_pipeline/
-    │   ├── calculate_energies.py
-    │   ├── extract_base_crystals.py
-    │   ├── generate_defects.py
-    │   └── structures_to_graphs.py
-    └── models/
-        ├── active_learning.py
-        └── train_gnn.py
+│   ├── defect_gnn.pth
+│   └── ensemble_model_*.pth
+├── results/
+│   ├── al_benchmark.csv
+│   ├── al_learning_curve.png
+│   ├── cv_metrics.csv
+│   ├── live_al_log.csv
+│   ├── parity_lodo.png
+│   └── uncertainty_calibration.csv
+├── src/
+│   ├── config.py
+│   ├── data_pipeline/
+│   │   ├── calculate_energies.py
+│   │   ├── extract_base_crystals.py
+│   │   ├── formation_energy.py
+│   │   ├── generate_defects.py
+│   │   ├── relax_references.py
+│   │   └── structures_to_graphs.py
+│   ├── models/
+│   │   ├── active_learning.py
+│   │   ├── evaluate.py
+│   │   └── train_gnn.py
+│   └── utils/
+│       ├── log.py
+│       └── seed.py
+└── tests/
+    ├── test_active_learning.py
+    ├── test_autonomous_lab.py
+    ├── test_defects.py
+    ├── test_evaluate.py
+    ├── test_formation_energy.py
+    ├── test_graphs.py
+    ├── test_manifest.py
+    └── test_model_shapes.py
 ```
 
 ## Setup
 
-Create an environment with Conda:
+Create a Python 3.10 environment using Conda:
 
 ```bash
 conda create -n dopant-gnn python=3.10
 conda activate dopant-gnn
 ```
 
-Or use a virtual environment:
+Or using python venv:
 
 ```bash
 python -m venv .venv
@@ -102,68 +163,23 @@ On Windows PowerShell:
 .venv\Scripts\Activate.ps1
 ```
 
-Install required dependencies:
+Install pinned dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Set up environment variables for Materials Project API access:
-
-```bash
-cp .env.example .env
-```
-
-On Windows PowerShell:
-
-```powershell
-Copy-Item .env.example .env
-```
-
-Set your API key in `.env`:
+Configure Materials Project access by copying `.env.example` to `.env` and setting `MP_API_KEY`:
 
 ```text
-MP_API_KEY=your_materials_project_key
+MP_API_KEY=your_materials_project_api_key
 ```
 
-## Usage
+## Limitations
 
-Execute pipeline stages sequentially from the repository root:
-
-```bash
-# 1. Download base crystal structures (requires MP_API_KEY)
-python -m src.data_pipeline.extract_base_crystals
-
-# 2. Generate defect supercells
-python -m src.data_pipeline.generate_defects
-
-# 3. Perform CHGNet relaxation and compute per-atom energy
-python -m src.data_pipeline.calculate_energies
-
-# 4. Construct graph representations
-python -m src.data_pipeline.structures_to_graphs
-
-# 5. Train the base edge-aware DopantGNN model
-python -m src.models.train_gnn
-
-# 6. Train the 5-model active learning ensemble
-python -m src.models.active_learning
-
-# 7. Run the closed-loop autonomous active learning cycle
-python autonomous_lab.py
-```
-
-## Active Learning Strategy
-
-The active learning framework implements bootstrapped ensemble sampling:
-
-1. **Ensemble Diversity:** Five independent `DopantGNN` models are instantiated with distinct random seeds (`42 + i`) and trained over bootstrapped subsets sampled with replacement from the validated graph pool.
-2. **Epistemic Uncertainty Estimation:** For candidate graphs, the ensemble outputs predictions $\{y_1, \dots, y_5\}$. Epistemic uncertainty is quantified as the sample standard deviation $\sigma = \sqrt{\frac{1}{M-1} \sum_{i=1}^M (y_i - \bar{y})^2}$.
-3. **Simulation Query Gate:** If $\sigma > 0.05$ eV/atom or if the candidate is unvalidated, the CHGNet potential simulation (`StructOptimizer`) is triggered.
-4. **Closed-Loop Retraining:** Labeled data is appended to the ground-truth dataset, duplicate records are pruned, graph representations are rebuilt, and the ensemble is refitted to reduce model variance on subsequent discovery iterations.
-
-## Current Scope & Limitations
-
-1. **Defect Configurations:** Focuses on single-site substitutional dopants in $3\times3\times3$ supercells. Interstitials, defect complexes, and variable doping concentrations are not currently covered.
-2. **Machine-Learned Potential Approximations:** Ground truth labels rely on CHGNet universal potentials; subsequent experimental verification or high-throughput DFT calculations can be integrated as secondary validation stages.
-3. **Graph Architecture:** Utilizes edge-weighted isotropic message passing (`GCNConv`). Higher-order directional or equivariant graph architectures (e.g., PaiNN, EGNN, Equiformer) represent natural extensions for capturing three-dimensional symmetry and bond angles.
+1. CHGNet is a pretrained machine-learned interatomic potential and is least reliable for actinides such as uranium, where localized 5f electron behavior and complex oxidation states challenge universal potential representations.
+2. Defect formation energies are calculated strictly for the neutral charge state ($q = 0$). Charged defect states, thermodynamic charge transition levels, and band bending corrections are not computed.
+3. Spin states and magnetic moments are handled implicitly through CHGNet without explicit validation against spin-polarized density functional theory reference calculations.
+4. The pipeline currently models single-site substitutional defects in fixed supercell volumes. Interstitial dopants, vacancy-dopant pairs, and defect complexes are not represented.
+5. The dataset consists of 75 substituted configurations across 25 dopants. This is a compact dataset designed for methodology demonstration and cross-validation benchmarking.
+6. The host transfer evaluation between 4H-SiC and GaN is exploratory because only two host crystal structures are included in the dataset.

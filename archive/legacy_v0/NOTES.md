@@ -12,3 +12,6 @@ Every CIF file in `data/processed/` has identical coordinates and cell volume ac
 
 3. Model checkpoint weights compatibility
 The checkpoint `models/dopant_gnn.pth` contains keys for `conv1`, `conv2`, `conv3`, and `out_layer`, but has no `embedding` or `mlp` keys. Consequently, it does not load into the current `DopantGNN` architecture definition.
+
+4. Relocation of unrelaxed generator output
+The directory `data/processed/` contained unrelaxed generator output for only site index 0, created without symmetry analysis or host relaxation. After verifying that MD5 sums matched `archive/legacy_v0/processed_cifs/`, the folder was moved to `archive/legacy_v0/processed_unrelaxed_site0/` to prevent mixing with the active pipeline data directories (`data/unrelaxed/`, `data/relaxed/`, and `data/candidates/`).

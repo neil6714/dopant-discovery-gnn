@@ -2,9 +2,31 @@
 __pycache__/
 *.pyc
 .vscode/
+
+# Logs
+logs/
+
+# Large binaries and checkpoints
 *.pth
 *.pt
-data/graph_data/
-data/processed/
+*.bin
+*.h5
+*.tar
+*.tar.gz
+*.zip
 archive/legacy_v0/*.pt
 archive/legacy_v0/*.pth
+
+# Intermediate datasets
+data/graph_data/
+data/processed/
+data/unrelaxed/
+data/relaxed/
+data/candidates/
+
+# Preserve tracked results and manifests
+!results/
+!results/*.csv
+!results/*.png
+!data/manifest.csv
+!data/references.csv
