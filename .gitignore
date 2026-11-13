@@ -6,3 +6,5 @@ __pycache__/
 *.pt
 data/graph_data/
 data/processed/
+archive/legacy_v0/*.pt
+archive/legacy_v0/*.pth
