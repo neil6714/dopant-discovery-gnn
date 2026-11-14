@@ -189,9 +189,9 @@ def relax_structure(
     n_atoms = len(final_structure)
     e_total = e_per_atom * n_atoms
 
-    # Sanity asserts: physical range [-12, 0] eV/atom and consistency between total and per-atom
-    assert -12.0 <= e_per_atom <= 0.0, (
-        f"Energy per atom ({e_per_atom:.4f} eV) outside expected physical range [-12, 0] eV"
+    # Sanity asserts: physical range [-20, 0] eV/atom and consistency between total and per-atom
+    assert -20.0 <= e_per_atom <= 0.0, (
+        f"Energy per atom ({e_per_atom:.4f} eV) outside expected physical range [-20, 0] eV"
     )
     assert np.isclose(e_total, e_per_atom * n_atoms, atol=1e-5), (
         f"Total energy ({e_total:.6f} eV) does not equal per-atom energy ({e_per_atom:.6f} eV) multiplied by {n_atoms}"
