@@ -172,7 +172,10 @@ def add_formation_energies(
     records = []
     for _, row in df_energies.iterrows():
         fname = str(row["filename"]).strip()
-        e_doped_total = float(row.get("e_total_ev", row.get("total_energy", np.nan)))
+        raw_e = row.get("e_total_ev")
+        if pd.isna(raw_e):
+            raw_e = row.get("total_energy", np.nan)
+        e_doped_total = float(raw_e)
         doped_converged = bool(row.get("converged", True))
 
         # Metadata from manifest or filename
@@ -199,16 +202,19 @@ def add_formation_energies(
         host_def = CONFIG.hosts.get(host_name)
         cation = host_def.cation_symbol if host_def else ("Si" if host_name == "SiC" else "Ga")
 
+        default_n = 216 if host_name == "SiC" else 108
+        raw_n = row.get("n_atoms")
+        n_atoms_sc = int(raw_n) if pd.notna(raw_n) else default_n
+
         # 1. Host supercell total energy
         host_sc_key = f"{host_name}_supercell"
         if host_sc_key in ref_energies:
             e_host_sc_per_atom = ref_energies[host_sc_key]
-            n_atoms_sc = ref_natoms.get(host_sc_key, int(row.get("n_atoms", 216)))
+            n_atoms_sc = ref_natoms.get(host_sc_key, n_atoms_sc)
             e_host_supercell_total = e_host_sc_per_atom * n_atoms_sc
             host_sc_conv = ref_converged.get(host_sc_key, True)
         elif host_name in ref_energies:
             e_host_sc_per_atom = ref_energies[host_name]
-            n_atoms_sc = int(row.get("n_atoms", 216))
             e_host_supercell_total = e_host_sc_per_atom * n_atoms_sc
             host_sc_conv = ref_converged.get(host_name, True)
         else:
