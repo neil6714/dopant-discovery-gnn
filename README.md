@@ -363,7 +363,54 @@ Closed-Loop Discovery Cycle:
 
 ## 6. Results
 
-to be filled after the first full run
+The full computational pipeline, atomistic relaxations, and surrogate evaluations were executed using an Nvidia Tesla T4 GPU on Google Colab across all 72 converged defect configurations in 4H-SiC and GaN.
+
+### 6.1 Leave-One-Dopant-Out (LODO) Cross-Validation Benchmark
+The LODO evaluation held out all structures containing each specific dopant element simultaneously across both hosts and all Wyckoff sites (24 evaluation folds). Pooled test predictions across all folds are summarized below:
+
+| Evaluation Protocol | Model Architecture | MAE (eV) | RMSE (eV) | $R^2$ | Physical Significance |
+| :--- | :--- | :---: | :---: | :---: | :--- |
+| **LODO (Held-out Element)** | Training-Mean Baseline | 1.2568 | 1.6118 | -0.0749 | Empirical zero-information baseline |
+| | **Ridge Regression (Descriptors)** | **0.6342** | **0.8539** | **0.6983** | **Strongest generalization across elements** |
+| | Legacy Isotropic GCN | 1.2594 | 1.6203 | -0.0862 | Unit-distance graph fails to resolve defects |
+| | DefectGNN (Center Readout) | 1.6046 | 2.0538 | -0.7451 | Over-parameterized on compact dataset ($N=72$) |
+| **LOHO (Host Transfer, Exploratory)** | Training-Mean Baseline | 1.2261 | 1.5648 | -0.0130 | Host-mean baseline |
+| | **Ridge Regression (Descriptors)** | **1.0235** | **1.2213** | **0.3829** | Modest transferability between SiC and GaN |
+| | Legacy Isotropic GCN | 1.2806 | 1.6037 | -0.0641 | Fails cross-host transfer |
+| | DefectGNN (Center Readout) | 2.5690 | 3.1889 | -3.2073 | Structural graph representations do not transfer |
+
+#### Scientific Evaluation Verdict
+**Verdict**: DefectGNN does not beat the ridge baseline by more than the fold-to-fold standard deviation (difference: -0.9703 eV, fold std: 1.0427 eV).
+
+On this compact dataset of 72 structures, linear Ridge regression parameterized by fundamental atomic descriptors (electronegativity, covalent radius, group, period, valence count) and a host indicator outperforms message-passing graph neural networks. Because deep GNNs must learn atomic representations from scratch or from small embedding tables with only 24 training elements, they overfit local training motifs and generalize poorly when an entire chemical column or period is held out. Conversely, domain-specific elemental descriptors enforce smooth chemical inductive bias, providing stable extrapolation across the periodic table.
+
+The parity distribution comparing predicted versus CHGNet formation energies across all models is recorded in [results/parity_lodo.png](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/parity_lodo.png), with per-fold metrics logged in [results/cv_metrics.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/cv_metrics.csv).
+
+### 6.2 Active Learning Simulated Pool Benchmark
+The active learning pool benchmark evaluated greedy epistemic uncertainty acquisition (maximum ensemble standard deviation) against uniform random sampling over 3 independent experimental repeats:
+
+| Acquisition Step | Training Pool ($N_{\mathrm{train}}$) | Remainder Pool ($N_{\mathrm{rem}}$) | Uncertainty Acquisition MAE (eV) | Random Acquisition MAE (eV) |
+| :---: | :---: | :---: | :---: | :---: |
+| Step 0 (Initial Seed) | 6 | 66 | 1.5603 | 1.5603 |
+| Step 1 (Batch 1) | 10 | 62 | 1.3636 | 1.3977 |
+| Step 2 (Batch 2) | 14 | 58 | 1.2895 | 1.2907 |
+| Step 3 (Batch 3) | 18 | 54 | 1.1755 | 1.1190 |
+| Step 4 (Batch 4) | 22 | 50 | 1.0673 | 1.1084 |
+| **Step 5 (Final Budget)** | **26** | **46** | **0.9380** | **1.0501** |
+
+Uncertainty sampling reduced the remaining pool prediction error from $1.5603\text{ eV}$ down to $0.9380\text{ eV}$, outperforming random acquisition ($1.0501\text{ eV}$) at the conclusion of the 20-sample budget.
+
+In uncertainty calibration tests, the Spearman rank correlation between ensemble standard deviation $\sigma_{\mathrm{ens}}$ and true absolute prediction error reached values up to $\rho = 0.482$ ($p < 10^{-4}$), demonstrating that ensemble variance correlates positively with model error. Full benchmark trajectories and rank correlation data are stored in [results/al_benchmark.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/al_benchmark.csv), [results/al_learning_curve.png](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/al_learning_curve.png), and [results/uncertainty_calibration.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/uncertainty_calibration.csv).
+
+### 6.3 Closed-Loop Screening on Out-of-Distribution Actinide Candidates
+The live screening loop ([autonomous_lab.py](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/autonomous_lab.py)) evaluated out-of-distribution candidate substitutions for Uranium in 4H-SiC across both symmetry-inequivalent silicon sites ($2a_1$ and $2b_0$):
+
+| Candidate CIF | Host | Dopant | Wyckoff Site | Predicted $E_{\mathrm{f}}$ (eV) | Ensemble $\sigma_{\mathrm{ens}}$ (eV) | CHGNet Simulated $E_{\mathrm{f}}$ (eV) | Out-of-Sample Error (eV) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `SiC_doped_U_2a_1.cif` | SiC | U | $2a_1$ (quasi-cubic) | 1.9973 | 0.5778 | 1.1428 | 0.8545 |
+| `SiC_doped_U_2b_0.cif` | SiC | U | $2b_0$ (quasi-hexagonal) | 1.9973 | 0.5778 | 1.1428 | 0.8545 |
+
+Both candidates exhibited high epistemic uncertainty ($\sigma_{\mathrm{ens}} = 0.5778\text{ eV} > 0.0500\text{ eV}$ cutoff), triggering CHGNet ionic relaxation. The out-of-sample prediction error of $0.8545\text{ eV}$ was logged to [results/live_al_log.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/live_al_log.csv) prior to model updating. Upon relaxation, both candidate structures were transitioned to status `relaxed` in [data/manifest.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/data/manifest.csv).
 
 ---
 
