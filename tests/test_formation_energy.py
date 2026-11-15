@@ -26,8 +26,8 @@ def test_formation_energy_formula_hand_checkable(tmp_path):
     df_energies = pd.DataFrame([
         {
             "filename": "SiC_doped_Ti_2b_0.cif",
-            "total_energy": -1620.0,
-            "energy_per_atom": -7.5,
+            "e_total_ev": -1620.0,
+            "e_per_atom_ev": -1620.0 / 216.0,
             "n_atoms": 216,
             "converged": True,
         }
@@ -82,3 +82,38 @@ def test_formation_energy_sign_convention():
     assert e_f_stable == -5.0
     assert e_f_unstable == 15.0
     assert e_f_stable < 0.0 < e_f_unstable
+
+
+def test_legacy_rows_do_not_produce_formation_energy(tmp_path):
+    """Rows from the first pipeline version (per-atom total_energy) must not give an E_f."""
+    pd.DataFrame([
+        {"filename": "SiC_doped_Ti.cif", "total_energy": -7.5, "energy_per_atom": -0.035},
+    ]).to_csv(tmp_path / "e.csv", index=False)
+    pd.DataFrame([
+        {"name": "SiC_supercell", "e_per_atom_ev": -7.52, "n_atoms": 216, "converged": True},
+        {"name": "Si", "e_per_atom_ev": -5.3, "n_atoms": 1, "converged": True},
+        {"name": "Ti", "e_per_atom_ev": -7.8, "n_atoms": 1, "converged": True},
+    ]).to_csv(tmp_path / "r.csv", index=False)
+    out = add_formation_energies(str(tmp_path / "e.csv"), str(tmp_path / "r.csv"), str(tmp_path / "m.csv"))
+    assert np.isnan(out.loc[0, "e_form_ev"])
+    assert not bool(out.loc[0, "converged_all"])
+
+
+def test_reference_within_force_slack_counts_as_converged(tmp_path):
+    """A reference stopped slightly above fmax is accepted, one far above is not."""
+    pd.DataFrame([
+        {"filename": "SiC_doped_Mn_2b_0.cif", "e_total_ev": -1620.0, "n_atoms": 216, "converged": True},
+    ]).to_csv(tmp_path / "e.csv", index=False)
+    pd.DataFrame([
+        {"name": "SiC_supercell", "e_per_atom_ev": -7.5, "n_atoms": 216, "converged": True, "max_force": 0.01},
+        {"name": "Si", "e_per_atom_ev": -5.3, "n_atoms": 1, "converged": True, "max_force": 0.01},
+        {"name": "Mn", "e_per_atom_ev": -9.1, "n_atoms": 29, "converged": False, "max_force": 0.0524},
+    ]).to_csv(tmp_path / "r.csv", index=False)
+    out = add_formation_energies(str(tmp_path / "e.csv"), str(tmp_path / "r.csv"), str(tmp_path / "m.csv"))
+    assert bool(out.loc[0, "converged_all"])
+
+    refs = pd.read_csv(tmp_path / "r.csv")
+    refs.loc[refs["name"] == "Mn", "max_force"] = 0.2
+    refs.to_csv(tmp_path / "r.csv", index=False)
+    out = add_formation_energies(str(tmp_path / "e.csv"), str(tmp_path / "r.csv"), str(tmp_path / "m.csv"))
+    assert not bool(out.loc[0, "converged_all"])

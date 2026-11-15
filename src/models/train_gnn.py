@@ -97,7 +97,18 @@ class DopantGNN(torch.nn.Module):
 
 
 class DefectGNN(torch.nn.Module):
-    """Crystal graph convolution network with learned embeddings and center readout."""
+    """Crystal graph convolution network with dopant-centred readout.
+
+    Defaults reproduce the original model. Two options address the failure seen in
+    leave-one-dopant-out CV:
+
+    use_embedding=False drops the learned element table. A held-out dopant never receives a
+    gradient in its embedding row, so at test time the model reads an untrained vector.
+    Physical descriptors give unseen elements a meaningful input instead.
+
+    global_dim>0 feeds the graph-level descriptor vector (data.desc) into the readout. This
+    is where mu_dopant enters, which carries most of the variance in the formation energy.
+    """
 
     def __init__(
         self,
@@ -106,29 +117,55 @@ class DefectGNN(torch.nn.Module):
         edge_dim: int = 8,
         num_elements: int = 101,
         emb_dim: int = 32,
+        use_embedding: bool = True,
+        global_dim: int = 0,
+        batch_norm: bool = True,
+        dropout: float = 0.0,
     ):
         super(DefectGNN, self).__init__()
         self.hidden_dim = hidden_dim
+        self.use_embedding = use_embedding
+        self.global_dim = global_dim
         self.y_mean: float = 0.0
         self.y_std: float = 1.0
 
-        self.element_embedding = Embedding(num_embeddings=num_elements, embedding_dim=emb_dim)
-
         # in_features has element_idx at [0] and (in_features - 1) continuous descriptors
         descriptor_dim = max(0, in_features - 1)
-        self.node_proj = Linear(emb_dim + descriptor_dim, hidden_dim)
+        if use_embedding:
+            self.element_embedding = Embedding(num_embeddings=num_elements, embedding_dim=emb_dim)
+            proj_in = emb_dim + descriptor_dim
+        else:
+            self.element_embedding = None
+            proj_in = descriptor_dim
+        self.node_proj = Linear(proj_in, hidden_dim)
 
-        # 3 Crystal Graph Convolution (CGConv) layers
-        self.conv1 = CGConv(channels=hidden_dim, dim=edge_dim, batch_norm=True)
-        self.conv2 = CGConv(channels=hidden_dim, dim=edge_dim, batch_norm=True)
-        self.conv3 = CGConv(channels=hidden_dim, dim=edge_dim, batch_norm=True)
+        self.conv1 = CGConv(channels=hidden_dim, dim=edge_dim, batch_norm=batch_norm)
+        self.conv2 = CGConv(channels=hidden_dim, dim=edge_dim, batch_norm=batch_norm)
+        self.conv3 = CGConv(channels=hidden_dim, dim=edge_dim, batch_norm=batch_norm)
 
-        # Readout: concatenates dopant node embedding with cluster mean pooling
+        readout_in = 2 * hidden_dim
+        if global_dim > 0:
+            self.global_proj = Linear(global_dim, hidden_dim)
+            # Scaler statistics live in buffers so they are saved with the checkpoint
+            self.register_buffer("desc_mean", torch.zeros(global_dim))
+            self.register_buffer("desc_std", torch.ones(global_dim))
+            readout_in += hidden_dim
+
+        self.dropout = torch.nn.Dropout(dropout)
         self.mlp = torch.nn.Sequential(
-            Linear(2 * hidden_dim, hidden_dim),
+            Linear(readout_in, hidden_dim),
             torch.nn.SiLU(),
             Linear(hidden_dim, 1),
         )
+
+    @torch.no_grad()
+    def fit_desc_scaler(self, graphs: List[Data]) -> None:
+        """Fit descriptor mean and std on training graphs only."""
+        if self.global_dim == 0:
+            return
+        stack = torch.cat([g.desc.view(1, -1) for g in graphs], dim=0)
+        self.desc_mean.copy_(stack.mean(dim=0))
+        self.desc_std.copy_(stack.std(dim=0, unbiased=False).clamp_min(1e-6))
 
     def forward(
         self,
@@ -137,6 +174,7 @@ class DefectGNN(torch.nn.Module):
         batch: Optional[torch.Tensor] = None,
         edge_attr: Optional[torch.Tensor] = None,
         z: Optional[torch.Tensor] = None,
+        desc: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass through embedding, crystal convolutions, and dual readout."""
         batch_obj = None
@@ -147,15 +185,15 @@ class DefectGNN(torch.nn.Module):
             batch = getattr(batch_obj, "batch", None)
             edge_attr = getattr(batch_obj, "edge_attr", None)
             z = getattr(batch_obj, "z", None)
+            desc = getattr(batch_obj, "desc", None)
 
-        # Extract atomic number for embedding
-        if z is None:
-            z = x[:, 0].long().clamp(0, 100)
         descriptors = x[:, 1:]
-
-        # Project concatenated embedding and descriptors
-        elem_emb = self.element_embedding(z)
-        h = self.node_proj(torch.cat([elem_emb, descriptors], dim=-1))
+        if self.use_embedding:
+            if z is None:
+                z = x[:, 0].long().clamp(0, 100)
+            h = self.node_proj(torch.cat([self.element_embedding(z), descriptors], dim=-1))
+        else:
+            h = self.node_proj(descriptors)
 
         # 3 CGConv message passing steps
         h = F.silu(self.conv1(h, edge_index, edge_attr=edge_attr))
@@ -177,7 +215,13 @@ class DefectGNN(torch.nn.Module):
                 dopant_h = global_mean_pool(h, batch)
 
         cluster_mean = global_mean_pool(h, batch)
-        readout = torch.cat([dopant_h, cluster_mean], dim=-1)
+        parts = [dopant_h, cluster_mean]
+        if self.global_dim > 0:
+            if desc is None:
+                raise ValueError("This DefectGNN needs graph-level descriptors (data.desc).")
+            desc = (desc.view(-1, self.global_dim) - self.desc_mean) / self.desc_std
+            parts.append(F.silu(self.global_proj(desc)))
+        readout = self.dropout(torch.cat(parts, dim=-1))
         return self.mlp(readout)
 
 
@@ -250,6 +294,7 @@ def train_one_model(
     save_path: Optional[str] = None,
     hidden_dim: int = 64,
     device: Optional[torch.device] = None,
+    model_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Tuple[DefectGNN, Dict[str, Any]]:
     """Train DefectGNN with target standardisation, cosine schedule, and early stopping.
 
@@ -266,6 +311,7 @@ def train_one_model(
         save_path: Path to save checkpoint dict.
         hidden_dim: Model hidden layer dimension.
         device: Torch compute device.
+        model_kwargs: Extra DefectGNN options (use_embedding, global_dim, batch_norm, dropout).
 
     Returns:
         Tuple of (trained DefectGNN model, training history dictionary).
@@ -303,7 +349,9 @@ def train_one_model(
         y_std = 1.0
 
     in_feat = train_graphs[0].x.size(-1) if train_graphs and train_graphs[0].x is not None else 9
-    model = DefectGNN(in_features=in_feat, hidden_dim=hidden_dim, edge_dim=8)
+    model_kwargs = dict(model_kwargs or {})
+    model = DefectGNN(in_features=in_feat, hidden_dim=hidden_dim, edge_dim=8, **model_kwargs)
+    model.fit_desc_scaler(train_graphs)
     model.y_mean = y_mean
     model.y_std = y_std
     model = model.to(device)
@@ -376,6 +424,7 @@ def train_one_model(
                 "lr": lr,
                 "weight_decay": weight_decay,
                 "epochs": epochs,
+                "model_kwargs": model_kwargs,
             },
             "y_mean": float(y_mean),
             "y_std": float(y_std),

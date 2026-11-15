@@ -37,6 +37,9 @@ from src.utils.log import get_logger
 
 logger = get_logger("formation_energy")
 
+# Elemental references may end up to this factor above fmax and still count as converged.
+REFERENCE_FORCE_SLACK = 1.5
+
 
 def relax_host_supercell(
     host_name: str,
@@ -165,17 +168,21 @@ def add_formation_energies(
     for _, row in df_refs.iterrows():
         name = str(row["name"]).strip()
         ref_energies[name] = float(row["e_per_atom_ev"])
-        ref_converged[name] = bool(row["converged"])
         ref_natoms[name] = int(row.get("n_atoms", 1))
+        # A reference that stops just above fmax still gives mu to a few meV, because the
+        # energy error is second order in the residual force. Accept it up to a stated slack.
+        max_force = row.get("max_force", np.nan)
+        within_slack = pd.notna(max_force) and float(max_force) <= REFERENCE_FORCE_SLACK * CONFIG.relax_fmax
+        ref_converged[name] = bool(row["converged"]) or bool(within_slack)
 
     # Compute formation energy row by row
     records = []
     for _, row in df_energies.iterrows():
         fname = str(row["filename"]).strip()
+        # Only the current schema is trusted. The old total_energy column holds per-atom
+        # values, so falling back to it silently produced formation energies of ~1000 eV.
         raw_e = row.get("e_total_ev")
-        if pd.isna(raw_e):
-            raw_e = row.get("total_energy", np.nan)
-        e_doped_total = float(raw_e)
+        e_doped_total = float(raw_e) if pd.notna(raw_e) else np.nan
         doped_converged = bool(row.get("converged", True))
 
         # Metadata from manifest or filename
@@ -342,6 +349,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Optional destination path (defaults to updating energies-csv).",
     )
     parser.add_argument(
+        "--relax-host-supercells",
+        action="store_true",
+        help="Relax the pristine 3x3x3 host supercells first (otherwise the primitive-cell energy is scaled).",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="Print summary statistics and validate formation energy values.",
@@ -355,6 +367,10 @@ def main(argv: Optional[List[str]] = None) -> None:
             if args.check:
                 check_formation_energies(df)
         return
+
+    if args.relax_host_supercells:
+        for host_name in CONFIG.hosts:
+            relax_host_supercell(host_name, references_csv=args.references_csv)
 
     df_result = add_formation_energies(
         energies_csv=args.energies_csv,

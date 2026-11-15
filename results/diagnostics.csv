@@ -1,0 +1,7 @@
+check,variant,n,mae_ev,rmse_ev,r2,note
+embedding_coverage,default DefectGNN,33,,,,33/33 LODO folds hold out an element whose embedding row is untrained
+embedding_ablation,"default (embedding, no global descriptors)",99,1.6503720000536755,2.1116346527113383,-0.7826952110941392,
+embedding_ablation,no embedding,99,0.7101772108463326,0.9456255761734609,0.6424984268969138,
+embedding_ablation,no embedding + mu_dopant in readout,99,0.7675835068779763,0.9831808846269967,0.6135383625420407,
+relaxed_ceiling,skipped,0,,,,relaxed CIFs found for 49/99 structures
+identity_ceiling,"ridge on one-hot dopant+host+site, random 5-fold",99,0.8080403684555336,1.0742119548409559,0.5386617118475343,"random split, so the same dopant is in train and test: an upper bound"

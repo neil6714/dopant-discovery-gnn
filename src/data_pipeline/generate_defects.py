@@ -16,6 +16,24 @@ from src.utils.log import get_logger
 logger = get_logger("generate_defects")
 
 
+SUPERCELL = [3, 3, 3]
+
+
+def supercell_index_of_site(supercell: Structure, cart_coords, tol: float = 0.05) -> int:
+    """Return the supercell index of the site sitting at the given Cartesian position.
+
+    make_supercell reorders atoms, so an index taken from the unit cell cannot be reused on
+    the supercell. The first version of this script did exactly that: index 2 of the unit
+    cell is a 2a site, but index 2 of the supercell is a translated copy of unit-cell site 0
+    (a 2b site). Both "inequivalent" sites ended up on the same sublattice. Matching by
+    position avoids the problem.
+    """
+    hits = supercell.get_sites_in_sphere(cart_coords, tol)
+    if not hits:
+        raise ValueError(f"No supercell site found within {tol} A of {cart_coords}")
+    return int(min(hits, key=lambda h: h.nn_distance).index)
+
+
 def generate_doped_structures(
     base_cif_path: str,
     target_element: str,
@@ -99,12 +117,19 @@ def generate_doped_structures(
         wyckoff_sym = site_info["wyckoff"]
 
         for dopant in dopants:
+            if dopant == target_element:
+                continue  # substituting an atom by itself is not a defect
             # Build fresh 3x3x3 supercell
             doped_struct = base_struct.copy()
-            doped_struct.make_supercell([3, 3, 3])
+            doped_struct.make_supercell(SUPERCELL)
 
-            # Substitute single target site
-            doped_struct.replace(sub_idx, dopant)
+            # Map the unit-cell site onto the supercell by position, then substitute
+            super_idx = supercell_index_of_site(doped_struct, base_struct[sub_idx].coords)
+            if doped_struct[super_idx].species.elements[0].symbol != target_element:
+                raise RuntimeError(
+                    f"Site {site_name} mapped to a non-{target_element} atom in the supercell"
+                )
+            doped_struct.replace(super_idx, dopant)
 
             filename = f"{output_prefix}_doped_{dopant}_{site_name}.cif"
             cif_path = os.path.join(output_dir, filename)

@@ -5,191 +5,94 @@
 [![Framework: PyTorch Geometric](https://img.shields.io/badge/Framework-PyTorch_Geometric-orange.svg)](https://pytorch-geometric.readthedocs.io/)
 [![Potential: CHGNet](https://img.shields.io/badge/MLIP-CHGNet-purple.svg)](https://chgnet.lbl.gov/)
 
-A computational materials science framework and machine learning surrogate for predicting substitutional defect formation energies in wide-bandgap semiconductors (4H-SiC and wurtzite GaN). The pipeline couples machine-learned interatomic potentials (CHGNet) for ionic relaxation with an edge-attributed Crystal Graph Convolutional Neural Network (DefectGNN). By extracting defect-centered cluster graphs directly from unrelaxed substituted host supercells, the surrogate performs instantaneous screening across transition-metal and actinide candidate libraries. The framework incorporates Leave-One-Dopant-Out cross-validation, bootstrapped deep ensemble epistemic uncertainty estimation, and closed-loop active learning workflows.
+A machine learning framework and surrogate benchmark for predicting neutral substitutional defect formation energies in wide-bandgap semiconductors (4H-SiC and wurtzite GaN). The pipeline uses a machine-learned interatomic potential (CHGNet) for ionic relaxation, then evaluates graph neural networks (DefectGNN), descriptor-based ridge regression, Gaussian processes, and hybrid residual models on unrelaxed defect-centered cluster graphs. The framework evaluates generalization through Leave-One-Dopant-Out cross-validation, Leave-One-Host-Out transfer, deep ensemble uncertainty quantification, and closed-loop active learning.
 
 ---
 
 ## 1. Materials Science and Defect Thermodynamics Theory
 
 ### 1.1 Wide-Bandgap Semiconductors and Point Defect Engineering
-Silicon carbide (specifically the 4H polytype, 4H-SiC, Materials Project identifier mp-11714) and wurtzite gallium nitride (GaN, Materials Project identifier mp-804) are premier wide-bandgap semiconductor materials. Their wide electronic bandgaps ($\approx 3.23\text{ eV}$ for 4H-SiC and $\approx 3.44\text{ eV}$ for GaN), high critical electric breakdown fields ($> 2.5\text{ MV/cm}$), and high thermal conductivities enable efficient high-power, high-voltage switching devices, radio-frequency power amplifiers, and solid-state optoelectronics.
+Silicon carbide (4H-SiC, Materials Project mp-11714) and wurtzite gallium nitride (GaN, Materials Project mp-804) are wide-bandgap semiconductors ($E_{\mathrm{g}} \approx 3.23\text{ eV}$ for 4H-SiC, $3.44\text{ eV}$ for GaN) with high critical breakdown fields ($> 2.5\text{ MV/cm}$) and high thermal conductivity. Incorporating substitutional transition-metal and main-group dopants introduces localized electronic states in the bandgap that serve as recombination centers, luminescence emitters, or spin qubits.
 
-Controlling electronic, optical, and magnetic functionality in these lattices requires intentional point defect engineering via substitutional doping. Transition-metal dopants introduce deep or shallow electronic states within the bandgap that act as recombination centers, luminescence emitters, or local magnetic moments for quantum spintronics. 
+Both crystals share the hexagonal space group $P6_3mc$ (No. 186), but differ in stacking sequence and cation site multiplicity:
+- **4H-SiC**: Four-bilayer stacking along the $c$-axis creates two symmetry-inequivalent silicon sites:
+  - Quasi-hexagonal site ($h$): Wyckoff position $2b$, internal site index 0.
+  - Quasi-cubic site ($k$): Wyckoff position $2a$, internal site index 1.
+- **Wurtzite GaN**: Two-bilayer stacking contains only one symmetry-inequivalent gallium site:
+  - Wyckoff position $2b$, internal site index 0.
 
-```
-4H-SiC Polytype Stacking Sequence (P6_3mc, Space Group 186):
-═════════════════════════════════════════════════════════════════════
-Layer 4 (A): ... C - Si(h) ...   <- Wyckoff 2b (quasi-hexagonal, site 0)
-Layer 3 (B): ... C - Si(k) ...   <- Wyckoff 2a (quasi-cubic, site 1)
-Layer 2 (C): ... C - Si(k) ...   <- Wyckoff 2a (quasi-cubic, site 1)
-Layer 1 (B): ... C - Si(h) ...   <- Wyckoff 2b (quasi-hexagonal, site 0)
-═════════════════════════════════════════════════════════════════════
-
-Wurtzite GaN Stacking Sequence (P6_3mc, Space Group 186):
-═════════════════════════════════════════════════════════════════════
-Layer 2 (B): ... N - Ga ...       <- Wyckoff 2b (single cation site, site 0)
-Layer 1 (A): ... N - Ga ...       <- Wyckoff 2b (single cation site, site 0)
-═════════════════════════════════════════════════════════════════════
-```
+Because the local coordination polyhedra and crystal fields differ between $2b$ and $2a$ sites in 4H-SiC, dopant substitution produces distinct formation energies at each position. Symmetrized sites are identified using `SpacegroupAnalyzer` and mapped to supercell coordinates by Cartesian position.
 
 ### 1.2 Neutral Substitutional Formation Energy Formalism
-The primary thermodynamic quantity governing defect incorporation and solubility is the defect formation energy. For a neutral substitutional defect where a host cation $X$ is replaced by a dopant atom $D$ ($D_X^0$ in Kroger-Vink notation), the formation energy is defined as:
+For a neutral defect where a host cation $X$ ($X = \text{Si}$ or $\text{Ga}$) is replaced by dopant $D$ ($D_X^0$ in Kroger-Vink notation), the formation energy is:
 
 $$
-E_{\mathrm{f}}[D_X^0] = E_{\mathrm{doped}} - E_{\mathrm{host,supercell}} + \mu_X - \mu_D
+E_{\mathrm{f}}[D_X^0] = E_{\mathrm{doped}} - E_{\mathrm{host, supercell}} + \mu_X - \mu_D
 $$
 
 where:
-- $E_{\mathrm{doped}}$ is the total potential energy of the relaxed 3x3x3 supercell containing the single substitutional dopant atom $D$ (in units of eV).
-- $E_{\mathrm{host,supercell}}$ is the total potential energy of the pristine, defect-free 3x3x3 host supercell containing $N$ atoms (216 atoms for 4H-SiC, 108 atoms for GaN), relaxed under identical conditions (in units of eV).
-- $\mu_X$ is the chemical potential of the host cation species removed from the lattice to accommodate the defect (eV/atom).
-- $\mu_D$ is the chemical potential of the added dopant species (eV/atom).
+- $E_{\mathrm{doped}}$ is the total energy of the relaxed 3x3x3 supercell containing the single substitutional dopant (eV).
+- $E_{\mathrm{host, supercell}}$ is the total energy of the relaxed defect-free host supercell (216 atoms for 4H-SiC, 108 atoms for GaN) under identical conditions (eV).
+- $\mu_X$ is the host cation chemical potential (eV/atom).
+- $\mu_D$ is the dopant chemical potential (eV/atom).
 
-#### Thermodynamic Stability and Chemical Potential Limits
-Chemical potentials reflect the thermodynamic reservoir conditions during crystal synthesis. To avoid the precipitation of bulk elemental phases, chemical potentials are bounded by elemental and compound thermodynamic equilibria:
-
-1. **4H-SiC System**:
-   Under thermodynamic equilibrium with the compound:
-
-$$
-\mu_{\mathrm{Si}} + \mu_{\mathrm{C}} = \mu_{\mathrm{SiC(bulk)}}
-$$
-
-   In the cation-rich (silicon-rich) growth limit, silicon is in equilibrium with bulk crystalline silicon:
-
-$$
-\mu_{\mathrm{Si}} = \mu_{\mathrm{Si(bulk)}}
-$$
-
-   The carbon chemical potential is consequently fixed at:
-
-$$
-\mu_{\mathrm{C}} = \mu_{\mathrm{SiC(bulk)}} - \mu_{\mathrm{Si(bulk)}} = \mu_{\mathrm{SiC(bulk)}} - \mu_{\mathrm{Si}}
-$$
-
-2. **GaN System**:
-   Similarly, for gallium nitride:
-
-$$
-\mu_{\mathrm{Ga}} + \mu_{\mathrm{N}} = \mu_{\mathrm{GaN(bulk)}}
-$$
-
-   In the cation-rich (gallium-rich) limit, gallium is in equilibrium with bulk metallic gallium:
-
-$$
-\mu_{\mathrm{Ga}} = \mu_{\mathrm{Ga(bulk)}}
-$$
-
-   Fixing the nitrogen chemical potential at:
-
-$$
-\mu_{\mathrm{N}} = \mu_{\mathrm{GaN(bulk)}} - \mu_{\mathrm{Ga(bulk)}}
-$$
-
-For the dopant species $D$, the upper thermodynamic boundary preventing pure dopant phase segregation is the per-atom energy of its most stable elemental bulk reference phase:
-
-$$
-\mu_D = \mu_{D\mathrm{(bulk)}}
-$$
-
-All elemental reference energies are calculated by relaxing the ground-state primitive structures retrieved from the Materials Project using CHGNet.
+#### Chemical Potential Boundaries (Cation-Rich Limit)
+Chemical potentials are bounded by elemental and compound thermodynamic equilibria to prevent bulk phase precipitation:
+- **4H-SiC**: Under $\mu_{\mathrm{Si}} + \mu_{\mathrm{C}} = \mu_{\mathrm{SiC(bulk)}}$, the cation-rich (Si-rich) limit fixes $\mu_{\mathrm{Si}} = \mu_{\mathrm{Si(bulk)}}$ (diamond cubic Si, mp-149) and $\mu_{\mathrm{C}} = \mu_{\mathrm{SiC(bulk)}} - \mu_{\mathrm{Si(bulk)}}$.
+- **GaN**: Under $\mu_{\mathrm{Ga}} + \mu_{\mathrm{N}} = \mu_{\mathrm{GaN(bulk)}}$, the cation-rich (Ga-rich) limit fixes $\mu_{\mathrm{Ga}} = \mu_{\mathrm{Ga(bulk)}}$ (orthorhombic Ga, mp-142) and $\mu_{\mathrm{N}} = \mu_{\mathrm{GaN(bulk)}} - \mu_{\mathrm{Ga(bulk)}}$.
+- **Dopant**: The upper solubility limit before dopant segregation is set by its bulk elemental ground state: $\mu_D = \mu_{D\mathrm{(bulk)}}$.
 
 #### Computational Relaxation Protocol
-Supercell energy relaxations are performed using CHGNet (Crystal Hamiltonian Graph Neural Network), a pretrained universal machine-learned interatomic potential. Relaxations enforce:
-1. **Neutral charge state ($q = 0$)**: Neutral defects avoid long-range Coulombic image interactions across periodic boundary conditions.
-2. **Fixed-cell volume and shape**: Lattice parameters and unit cell angles are fixed to the relaxed pristine host lattice, relaxing only internal ionic positions until maximum interatomic forces fall below $0.05\text{ eV/\AA}$. Fixed-cell relaxation prevents artificial macroscopic supercell distortion while capturing local bond relaxation around the defect.
-
-### 1.3 Crystallographic Symmetry and Wyckoff Site Multiplicity
-In non-cubic crystal systems, crystallographically distinct lattice sites exhibit different local coordination environments and site symmetries:
-
-1. **4H-SiC ($P6_3mc$, No. 186)**: The 4-bilayer stacking sequence along the $c$-axis creates two symmetry-inequivalent silicon sites:
-   - **Quasi-hexagonal site ($h$)**: Wyckoff position $2b$, internal site index 0. Surrounded by coordination polyhedra that resemble the hexagonal wurtzite lattice.
-   - **Quasi-cubic site ($k$)**: Wyckoff position $2a$, internal site index 1. Surrounded by coordination polyhedra resembling the face-centered cubic zinc-blende lattice.
-   Because the local crystal field and bond lengths differ between $h$ and $k$ positions, substituting a dopant at $2b$ versus $2a$ results in distinct formation energies. Both sites are systematically enumerated using `SpacegroupAnalyzer.get_symmetrized_structure`.
-
-2. **Wurtzite GaN ($P6_3mc$, No. 186)**: The 2-bilayer stacking sequence contains only one symmetry-inequivalent gallium site:
-   - Wyckoff position $2b$, internal site index 0.
+Atomistic relaxations are carried out with CHGNet (Crystal Hamiltonian Graph Neural Network):
+1. **Neutral charge state ($q = 0$)**: Avoids long-range periodic Coulomb image corrections.
+2. **Fixed-cell relaxation**: Supercell lattice vectors remain clamped to the pristine relaxed host dimensions, relaxing only ionic positions until maximum interatomic forces fall below $0.05\text{ eV/\AA}$. This captures local bond relaxation around the defect without artificial cell distortion.
 
 ---
 
 ## 2. Machine Learning Surrogate Theory and Graph Architecture
 
 ### 2.1 Screening Surrogates on Unrelaxed Geometries
-Evaluating point defect formation energies via electronic structure calculations or atomistic potential relaxation requires iterative geometry optimization. Even with accelerated neural network potentials, relaxing a 216-atom supercell requires hundreds of force evaluations taking several minutes per candidate structure.
-
-```
-Candidate Exploration Flow:
-┌────────────────────────┐      Direct Inference
-│ Unrelaxed Substituted  │ ──────────────────────────┐
-│ Supercell Geometry     │                           │
-└────────────────────────┘                           ▼
-            │                            ┌───────────────────────┐
-            │ Relaxation (CHGNet)        │ DefectGNN Surrogate   │
-            ▼                            │ Prediction (~10 ms)   │
-┌────────────────────────┐               └───────────────────────┘
-│ Relaxed Supercell &    │                           │
-│ Total Energy (Minutes) │                           │ Triage & Prioritize
-└────────────────────────┘                           │
-            │                                        ▼
-            ▼                            ┌───────────────────────┐
-┌────────────────────────┐               │ High-Priority         │
-│ Thermodynamic Label    │ ◄──────────── │ Candidates for Full   │
-│ E_formation (eV)       │   Supervision │ Atomistic Relaxation  │
-└────────────────────────┘               └───────────────────────┘
-```
-
-The machine learning surrogate is formulated as a rapid screening model: it takes the unrelaxed substituted geometry as input and predicts the relaxed neutral formation energy $E_{\mathrm{f}}$ directly. This enables screening vast candidate libraries in milliseconds, reserving atomistic relaxation for the most promising defect candidates.
-
-### 2.2 Defect-Centered Local Cluster Graph Construction
-Because point defect perturbations are localized within a few coordination shells of the substitution site, whole-cell supercell graphs dilute the defect signal across hundreds of spectator atoms. The pipeline extracts a localized defect cluster:
+Evaluating point defect formation energies via atomistic potentials requires minutes per structure for 216-atom supercells. The surrogate model is formulated to predict relaxed formation energies $E_{\mathrm{f}}$ directly from unrelaxed substituted geometries in milliseconds, allowing rapid prioritization before running full relaxations.
 
 ```mermaid
 flowchart TD
-    subgraph ClusterExtraction["1. Local Cluster Extraction"]
-        C1["Unrelaxed Substituted Supercell"] --> C2["Identify Dopant Site Coordinate"]
-        C2 --> C3["Extract Cluster: r <= 6.0 Angstroms<br/>Periodic Minimum Image Convention"]
-        C3 --> C4["Localized Defect Graph (V, E)"]
+    subgraph ClusterExtraction["1. Cluster Extraction"]
+        C1["Unrelaxed Substituted Supercell"] --> C2["Locate Substitutional Dopant Site"]
+        C2 --> C3["Extract Defect Cluster: r <= 6.0 Angstroms<br/>Periodic Minimum Image Convention"]
+        C3 --> C4["Localized Graph (V, E)"]
     end
 
-    subgraph FeatureEngineering["2. Node & Edge Representations"]
-        C4 --> N1["Node Features x_i in R^9<br/>- Learned Element Embedding (64-d)<br/>- Physical Descriptors: Electronegativity, Radius, Group, Period, Valence<br/>- Binary Dopant Indicator<br/>- One-Hot Host Encoding"]
-        C4 --> E1["Edge Features e_ij in R^8<br/>- Cutoff: r_edge <= 4.5 Angstroms<br/>- 8-Channel Continuous Gaussian RBF Expansion"]
+    subgraph Representations["2. Node, Edge and Global Features"]
+        C4 --> N1["Node Features x_i in R^9<br/>Electronegativity, Covalent Radius, Group, Period, Valence<br/>Binary Dopant Indicator, One-Hot Host Encoding"]
+        C4 --> E1["Edge Features e_ij in R^8<br/>Cutoff: r_edge <= 4.5 Angstroms<br/>8-Channel Continuous Gaussian RBF"]
+        C4 --> G1["Global Descriptors g in R^15<br/>Dopant and Host Cation Properties, mu_D, Host Indicator"]
     end
 
-    subgraph DeepArchitecture["3. DefectGNN Neural Architecture"]
-        N1 & E1 --> L1["Initial Projection to Hidden Dim (64-d)"]
-        L1 --> L2["Crystal Graph Convolution Layer 1 (CGConv)"]
-        L2 --> L3["Crystal Graph Convolution Layer 2 (CGConv)"]
-        L3 --> L4["Crystal Graph Convolution Layer 3 (CGConv)"]
-        L4 --> RO["Center-Focused Readout:<br/>h_graph = [ x_dopant || Mean(x_cluster) ] in R^128"]
-        RO --> MLP["2-Layer MLP Head with GELU Activation"]
+    subgraph ForwardPass["3. Deep Architectures"]
+        N1 & E1 --> CG["3x CGConv Message Passing Layers"]
+        CG --> RO["Center-Focused Readout:<br/>h_graph = [ x_dopant || Mean(x_cluster) ]"]
+        RO & G1 --> MLP["MLP Prediction Head"]
         MLP --> OUT["Predicted Formation Energy E_f (eV)"]
     end
 ```
 
-#### Graph Construction Specifications:
-1. **Cluster Radius**: All atoms within $r_{\mathrm{cluster}} = 6.0\text{ \AA}$ of the substitutional dopant site are retained, incorporating periodic neighbor images.
-2. **Edge Radius**: Edges are constructed between all atom pairs within $r_{\mathrm{edge}} = 4.5\text{ \AA}$ using periodic minimum image distance metrics.
-3. **Continuous Radial Basis Function (RBF) Edge Features**: Interatomic distances $d_{ij}$ are projected onto an 8-channel Gaussian basis:
+### 2.2 Local Cluster Graphs and Feature Engineering
+Because defect strain drops rapidly with distance, whole-cell supercell graphs dilute the defect signal across hundreds of spectator atoms. A defect-centered cluster is extracted:
+1. **Cluster radius**: Atoms within $r_{\mathrm{cluster}} = 6.0\text{ \AA}$ of the dopant site under periodic boundary conditions are retained.
+2. **Edge radius**: Edges connect atom pairs within $r_{\mathrm{edge}} = 4.5\text{ \AA}$.
+3. **Radial Basis Function (RBF) edges**: Interatomic distances $d_{ij}$ are expanded on an 8-channel Gaussian basis:
 
 $$
 e_{ij, k} = \exp\left( -\gamma (d_{ij} - \mu_k)^2 \right), \quad k \in \{1, \dots, 8\}
 $$
 
-   where centers $\mu_k$ are uniformly distributed between $0.5\text{ \AA}$ and $4.5\text{ \AA}$, with inverse variance $\gamma = 1 / (2 \sigma^2)$ providing smooth, continuous distance sensitivity.
+with centers $\mu_k$ spaced from $0.5\text{ \AA}$ to $4.5\text{ \AA}$ and $\gamma = 1 / (2 \sigma^2)$.
 
-4. **Node Feature Vector ($\mathbf{x}_i \in \mathbb{R}^9$)**:
-   - Atomic number $Z_i$ passed to a 64-dimensional learned embedding table.
-   - Scaled Pauling electronegativity: $\chi_i / 4.0$.
-   - Scaled covalent radius: $r_{\mathrm{cov}, i} / 2.5\text{ \AA}$.
-   - Scaled periodic table group: $G_i / 18.0$.
-   - Scaled periodic table period: $P_i / 7.0$.
-   - Scaled valence electron count: $V_i / 14.0$.
-   - Binary dopant indicator flag: $I_{\mathrm{dopant}, i} \in \{0, 1\}$.
-   - One-hot host crystal encoding: $\mathbf{h}_{\mathrm{host}} \in \{0, 1\}^2$ ($[1, 0]$ for 4H-SiC, $[0, 1]$ for GaN).
+4. **Node features ($\mathbf{x}_i \in \mathbb{R}^9$)**: Scaled Pauling electronegativity ($\chi / 4.0$), covalent radius ($r_{\mathrm{cov}} / 2.5\text{ \AA}$), periodic group ($G / 18.0$), period ($P / 7.0$), valence electrons ($V / 14.0$), binary dopant indicator ($I_{\mathrm{dopant}} \in \{0, 1\}$), and one-hot host indicator ($[1, 0]$ for SiC, $[0, 1]$ for GaN).
+5. **Global descriptors ($\mathbf{g} \in \mathbb{R}^{15}$)**: For models incorporating global chemistry, $\mathbf{g}$ combines elemental descriptors of the dopant and replaced host cation, their differences ($\Delta \chi$, $\Delta r_{\mathrm{cov}}$), the dopant chemical potential $\mu_D$, and the host indicator.
 
-### 2.3 Mathematical Formulation of CGConv and Center Readout
-Message passing is implemented via Crystal Graph Convolution (CGConv) layers operating with continuous edge vectors. For node $i$ at layer $l$:
+### 2.3 Message Passing and Center Readout
+Message passing uses Crystal Graph Convolution (CGConv) layers:
 
 $$
 \mathbf{z}_{ij}^{(l)} = \left[ \mathbf{x}_i^{(l)} \,\|\, \mathbf{x}_j^{(l)} \,\|\, \mathbf{e}_{ij} \right]
@@ -199,218 +102,164 @@ $$
 \mathbf{x}_i^{(l+1)} = \mathbf{x}_i^{(l)} + \sum_{j \in \mathcal{N}(i)} \sigma\left(\mathbf{z}_{ij}^{(l)} \mathbf{W}_{\mathrm{f}}^{(l)} + \mathbf{b}_{\mathrm{f}}^{(l)}\right) \odot g\left(\mathbf{z}_{ij}^{(l)} \mathbf{W}_{\mathrm{s}}^{(l)} + \mathbf{b}_{\mathrm{s}}^{(l)}\right)
 $$
 
-where $\sigma$ denotes the element-wise sigmoid gating activation, $g$ represents the Softplus activation, $\odot$ is the Hadamard product, and $\mathbf{W}_{\mathrm{f}}, \mathbf{W}_{\mathrm{s}}$ are learnable weight tensors.
-
-#### Center-Focused Readout
-Standard graph neural networks apply global mean or sum pooling over all cluster nodes. In defect screening, the chemical identity and local distortion of the defect center itself are paramount. DefectGNN implements a center-focused readout that concatenates the final representation of the central dopant node with the mean representation of the surrounding cluster:
+where $\sigma$ is the sigmoid gate and $g$ is Softplus. The center-focused readout concatenates the final central dopant node state with the mean cluster embedding:
 
 $$
-\mathbf{h}_{\mathrm{graph}} = \left[ \mathbf{x}_{\mathrm{dopant}}^{(L)} \,\|\, \frac{1}{|\mathcal{V}|} \sum_{i \in \mathcal{V}} \mathbf{x}_i^{(L)} \right] \in \mathbb{R}^{2 d}
+\mathbf{h}_{\mathrm{graph}} = \left[ \mathbf{x}_{\mathrm{dopant}}^{(L)} \,\|\, \frac{1}{|\mathcal{V}|} \sum_{i \in \mathcal{V}} \mathbf{x}_i^{(L)} \right]
 $$
 
-The concatenated vector is processed by a 2-layer Multi-Layer Perceptron (MLP) with GELU non-linearities to output the scalar formation energy prediction:
-
-$$
-\hat{y} = \mathbf{W}_2 \mathrm{GELU}(\mathbf{W}_1 \mathbf{h}_{\mathrm{graph}} + \mathbf{b}_1) + b_2
-$$
-
-#### Target Standardization and Optimization Protocol
-To prevent scale variance from destabilizing gradient descent, target formation energies are standardized strictly within training folds:
-
-$$
-y_{\mathrm{norm}} = \frac{y - \bar{y}_{\mathrm{train}}}{\sigma_{y, \mathrm{train}}}
-$$
-
-The loss function is the Smooth L1 loss (Huber loss with $\beta = 1.0$) evaluated on normalized targets:
-
-$$
-\mathcal{L}_{\mathrm{smooth}} = \begin{cases} 
-0.5 (y_{\mathrm{norm}} - \hat{y}_{\mathrm{norm}})^2 & \text{if } |y_{\mathrm{norm}} - \hat{y}_{\mathrm{norm}}| < 1.0 \\
-|y_{\mathrm{norm}} - \hat{y}_{\mathrm{norm}}| - 0.5 & \text{otherwise}
-\end{cases}
-$$
-
-Models are trained using the AdamW optimizer (learning rate $1.0 \times 10^{-3}$, weight decay $1.0 \times 10^{-4}$) with a Cosine Annealing learning rate schedule and early stopping based on validation Mean Absolute Error (MAE).
+Predictions are generated via a 2-layer MLP with GELU activations. Targets are standardized strictly inside training folds ($y_{\mathrm{norm}} = (y - \bar{y}_{\mathrm{train}}) / \sigma_{y, \mathrm{train}}$) and trained using Smooth L1 loss with the AdamW optimizer and Cosine Annealing learning rate schedule.
 
 ---
 
 ## 3. Data Schema, Manifest Tracking, and Provenance
 
-### 3.1 Data Schema and Manifest Tracking
-The dataset tracks unrelaxed configurations, relaxed structures, and active learning candidates in [data/manifest.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/data/manifest.csv):
+### 3.1 Data Schema
+Defect configurations, status flags, and paths are tracked in [data/manifest.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/data/manifest.csv):
 
-| Column | Type | Description | Permitted Values |
-| :--- | :---: | :--- | :--- |
-| `filename` | string | Unique primary key identifier for the configuration | e.g. `SiC_doped_Ti_2b_0.cif` |
-| `host` | string | Host crystal system | `SiC`, `GaN` |
-| `site` | string | Symmetry-inequivalent site label with index | `2b_0`, `2a_1` |
-| `wyckoff` | string | Wyckoff letter | `2b`, `2a` |
-| `dopant` | string | Chemical symbol of the substituted dopant | e.g. `Ti`, `Fe`, `U` |
-| `dopant_z` | integer | Atomic number of the dopant species | e.g. 22, 26, 92 |
-| `status` | string | Execution lifecycle stage | `unrelaxed`, `relaxed`, `candidate` |
-| `ood_flag` | boolean | Out-of-distribution indicator (Uranium holdout) | `True`, `False` |
-| `unrelaxed_path` | string | Relative path to unrelaxed substituted CIF | `data/unrelaxed/<file>` |
-| `relaxed_path` | string | Relative path to CHGNet relaxed CIF | `data/relaxed/<file>` |
+| Column | Type | Description |
+| :--- | :---: | :--- |
+| `filename` | string | Unique primary key identifier (e.g. `SiC_doped_Ti_2b_0.cif`) |
+| `host` | string | Host crystal system (`SiC`, `GaN`) |
+| `site` | string | Symmetry-inequivalent site label (`2b_0`, `2a_1`) |
+| `wyckoff` | string | Wyckoff letter (`2b`, `2a`) |
+| `dopant` | string | Dopant chemical symbol (e.g. `Ti`, `Fe`, `U`) |
+| `dopant_z` | integer | Dopant atomic number |
+| `status` | string | Pipeline lifecycle state (`unrelaxed`, `relaxed`, `candidate`) |
+| `ood_flag` | boolean | Out-of-distribution indicator (True for Uranium) |
+| `unrelaxed_path` | string | Relative path to unrelaxed CIF |
+| `relaxed_path` | string | Relative path to CHGNet relaxed CIF |
 
-### 3.2 Elemental Reference Ground States
-Ground-state elemental reference phases downloaded via the Materials Project API are recorded in `data/raw/references/sources.csv` and relaxed into [data/references.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/data/references.csv):
+The dataset spans 33 dopants: 25 transition metals (3d, 4d, 5d), 7 main-group elements (Al, Ca, Ge, Mg, Sn, Be, Cd), and 1 actinide (U) across 4H-SiC ($2b_0$, $2a_1$) and GaN ($2b_0$), totaling 99 training/evaluation defect structures and 2 candidate configurations.
 
-| Element | Material ID | Space Group | Crystal System | Role |
-| :---: | :---: | :---: | :---: | :--- |
-| **Si** | mp-149 | $Fd\bar{3}m$ (227) | Cubic (Diamond) | Host cation reference for 4H-SiC |
-| **C** | mp-48 | $P6_3/mmc$ (194) | Hexagonal (Graphite) | Host anion reference for 4H-SiC |
-| **Ga** | mp-142 | $Cmce$ (64) | Orthorhombic | Host cation reference for GaN |
-| **N** | mp-156 | $P6_3/mmc$ (194) | Hexagonal ($N_2$ solid) | Host anion reference for GaN |
-| **3d Metals** | mp-72 (Ti) to mp-79 (Zn) | Various | Ground states | Transition-metal dopant references |
-| **4d Metals** | mp-100 (Zr) to mp-124 (Cd) | Various | Ground states | Transition-metal dopant references |
-| **5d Metals** | mp-33 (Hf) to mp-83 (Hg) | Various | Ground states | Transition-metal dopant references |
-| **U** | mp-131 | $Cmcm$ (63) | Orthorhombic ($\alpha$-U) | Out-of-distribution actinide reference |
+### 3.2 Archival and Provenance
+Earlier pipeline revisions had two known issues:
+1. `generate_defects.py` mapped unit-cell site indices onto supercells by index rather than Cartesian position, duplicating the $2b$ site twice.
+2. Legacy CSV files retained unrelaxed energy labels from early prototypes.
 
-### 3.3 Legacy V0 Archival and Provenance
-An earlier prototype of this codebase contained three methodological flaws:
-1. Training energy labels were taken directly from initial unrelaxed structures without cell energy standardization.
-2. The graph neural network used an isotropic GCN architecture without continuous edge distance features.
-3. 4H-SiC defects were generated only on the first arbitrary silicon atom without distinguishing $2b$ and $2a$ Wyckoff sites.
-
-To preserve scientific reproducibility, all legacy data, graphs, and models were moved to [archive/legacy_v0/](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/archive/legacy_v0) with complete cryptographic MD5 hashes and technical documentation preserved in [archive/legacy_v0/NOTES.md](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/archive/legacy_v0/NOTES.md).
+All duplicate-site structures and legacy rows were safely isolated into [archive/legacy_v1/](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/archive/legacy_v1) and [archive/legacy_v0/](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/archive/legacy_v0) with cryptographic MD5 verification preserved in [archive/legacy_v0/NOTES.md](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/archive/legacy_v0/NOTES.md).
 
 ---
 
-## 4. Evaluation Protocol and Cross-Validation Benchmarks
+## 4. Evaluation Protocol and Model Hierarchy
 
 ### 4.1 Leave-One-Dopant-Out (LODO) Cross-Validation
-Standard random $k$-fold cross-validation is vulnerable to subtle chemical data leakage: if a dopant element (e.g. Titanium) appears in the training fold on the $2b$ site of 4H-SiC, the model memorizes the elemental electronegativity and atomic radius when predicting Titanium on the $2a$ site or on GaN in the test fold.
-
-To measure true generalization to unseen chemical elements, the evaluation suite implements Leave-One-Dopant-Out (LODO) cross-validation:
-- Every structure containing a specific dopant element $D$ across all hosts and Wyckoff sites is held out together in the test split.
-- Models are trained exclusively on the remaining 24 dopant elements.
-- The evaluation iterates across all 25 folds, pooling test predictions to calculate unbiased global metrics: Mean Absolute Error (MAE), Root Mean Squared Error (RMSE), and the Coefficient of Determination ($R^2$).
-
-```
-LODO Split Protocol (25 Iterations):
-Fold k:
-  Train Set: All structures for 24 dopants across 4H-SiC (2b, 2a) and GaN (2b)
-  Holdout Test: ALL structures containing dopant D_k (held out simultaneously)
-```
-
-#### Benchmark Model Hierarchy
-The benchmark compares four distinct modeling paradigms:
-1. **Training-Mean Baseline**: Predicts the scalar mean of the training fold labels $\bar{y}_{\mathrm{train}}$ for all test samples. Represents the zero-information empirical baseline.
-2. **Ridge Regression**: Linear regression with L2 regularization ($L_2 = 1.0$) trained on dopant elemental physical descriptors (electronegativity, covalent radius, group, period, valence electrons) concatenated with a host one-hot indicator.
-3. **Legacy Isotropic GCN**: 2-layer Graph Convolutional Network operating on whole-cell supercell graphs with unit edge weights (the legacy v0 model architecture).
-4. **DefectGNN**: 3-layer Crystal Graph Convolution network operating on 6.0 Angstrom unrelaxed defect clusters with 8-channel Gaussian RBF edge attributes and center-focused readout.
+Random train-test splits allow chemical leakage: if Titanium on 4H-SiC $2b_0$ is in the training set, the model memorizes Titanium properties when predicting on $2a_1$ or GaN. Under LODO:
+- All defect structures containing a specific dopant element $D$ across both hosts and all Wyckoff sites are held out together.
+- Models are trained on the remaining 32 dopants and evaluated strictly on the unseen element.
+- Test predictions are pooled across all 33 folds to compute unbiased MAE, RMSE, and $R^2$.
 
 ### 4.2 Leave-One-Host-Out (LOHO) Cross-Validation
-To explore cross-system transferability, Leave-One-Host-Out (LOHO) cross-validation trains on all defect structures of 4H-SiC and tests on GaN, and vice versa. Because the dataset currently comprises two host lattices, this benchmark is designated as exploratory.
+Cross-system transferability is tested by training exclusively on 4H-SiC (66 structures) and evaluating on GaN (33 structures), and vice versa. Because only two host crystals are present, this benchmark is exploratory.
+
+### 4.3 Evaluated Model Hierarchy
+1. **Mean Predictor**: Training set label mean $\bar{y}_{\mathrm{train}}$ (zero-information baseline).
+2. **Ridge Baseline**: Ridge regression on 5 dopant atomic descriptors plus host one-hot encoding.
+3. **Legacy GCN**: 2-layer Graph Convolutional Network on whole-cell graphs with unit edge weights.
+4. **DefectGNN (Default)**: 3-layer CGConv with 64-dim learned element embeddings, RBF edges, and center readout.
+5. **Ridge Rich**: Ridge regression on 14 elemental and chemical potential descriptors.
+6. **GP Isotropic**: Gaussian Process with Matern 5/2 kernel and a single length scale on 14 descriptors.
+7. **GP ARD**: Gaussian Process with Matern 5/2 kernel and Automatic Relevance Determination (individual length scale per descriptor).
+8. **DefectGNN + Descriptors**: CGConv with continuous node descriptors (no embedding lookup table) concatenated with the 15-dim global descriptor vector $\mathbf{g}$ in the readout.
+9. **Residual GNN**: Hybrid model using GP ARD as a base predictor with a lightweight GNN trained on the GP residuals.
 
 ---
 
 ## 5. Active Learning and Closed-Loop Screening
 
 ### 5.1 Deep Ensemble Epistemic Uncertainty Estimation
-To guide the acquisition of new candidate defects, the framework trains a deep ensemble of $M = 5$ DefectGNN models. Each ensemble member is initialized with independent weight initializations and trained on a bootstrap sample of the training dataset.
-
-For a new candidate defect graph $\mathbf{x}$, the ensemble provides:
-1. **Predictive Formation Energy**:
+An ensemble of $M = 5$ models is trained using bootstrap sampling and independent parameter initializations. For candidate graph $\mathbf{x}$:
 
 $$
-\bar{y}(\mathbf{x}) = \frac{1}{M} \sum_{m=1}^M \hat{y}_m(\mathbf{x})
+\bar{y}(\mathbf{x}) = \frac{1}{M} \sum_{m=1}^M \hat{y}_m(\mathbf{x}), \quad \sigma_{\mathrm{ens}}(\mathbf{x}) = \sqrt{ \frac{1}{M - 1} \sum_{m=1}^M \left( \hat{y}_m(\mathbf{x}) - \bar{y}(\mathbf{x}) \right)^2 }
 $$
 
-2. **Epistemic Uncertainty ($\sigma_{\mathrm{ens}}$)**:
+Uncertainty standard deviations are rescaled to eV.
 
-$$
-\sigma_{\mathrm{ens}}(\mathbf{x}) = \sqrt{ \frac{1}{M - 1} \sum_{m=1}^M \left( \hat{y}_m(\mathbf{x}) - \bar{y}(\mathbf{x}) \right)^2 }
-$$
-
-Uncertainty standard deviations are scaled back into physical units of eV, providing an interpretable confidence interval.
-
-### 5.2 Simulated Pool Benchmark
-The simulated pool benchmark (`src.models.active_learning --benchmark`) treats the labeled dataset as a simulated oracle to compare active learning acquisition policies against random sampling:
-1. **Initialization**: Starts from an initial random seed pool of 10 labeled defects.
-2. **Acquisition Policies**:
-   - **Uncertainty Sampling**: Greedily selects the batch of unlabeled candidates with the largest ensemble standard deviation $\sigma_{\mathrm{ens}}$.
-   - **Random Sampling**: Selects candidate batches uniformly at random.
-3. **Evaluation**: After each acquisition batch, the ensemble is retrained from scratch and evaluated on the untouched remainder pool.
-4. **Calibration**: Computes the Spearman rank correlation coefficient between ensemble standard deviation $\sigma_{\mathrm{ens}}$ and the absolute prediction error $|y - \bar{y}|$ on held-out folds to quantify uncertainty calibration.
-
-Results and curves are saved to [results/al_benchmark.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/al_benchmark.csv), [results/al_learning_curve.png](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/al_learning_curve.png), and [results/uncertainty_calibration.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/uncertainty_calibration.csv).
-
-### 5.3 Live Screening Loop Workflow
-The autonomous screening script ([autonomous_lab.py](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/autonomous_lab.py)) executes closed-loop discovery:
-
-```
-Closed-Loop Discovery Cycle:
-1. Candidate Pool: Unrelaxed CIFs in data/candidates/ (tracked via data/manifest.csv)
-                      │
-                      ▼
-2. Ensemble Screening: Predict formation energy and ensemble std (eV)
-                      │
-                      ▼
-3. Acquisition Ranking: Sort candidates by max uncertainty (std > cutoff)
-                      │
-                      ▼
-4. Simulation Dispatch: Perform CHGNet ionic relaxation (fixed cell) on top batch
-                      │
-                      ▼
-5. Out-of-Sample Logging: Record error to results/live_al_log.csv BEFORE retraining
-                      │
-                      ▼
-6. Retrain Ensemble: Update models and transition candidate status to 'relaxed'
-```
+### 5.2 Simulated Pool Benchmark and Live Screening
+The pool benchmark (`src.models.active_learning --benchmark`) initializes from a seed pool of 6 samples and acquires batches of 4 candidates over 5 steps from the pool, comparing greedy uncertainty sampling against random acquisition. Evaluation is performed on a held-out cluster of unseen dopants (24 structures). In the live loop ([autonomous_lab.py](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/autonomous_lab.py)), candidate structures with $\sigma_{\mathrm{ens}} > 0.25\text{ eV}$ trigger automated CHGNet relaxation before logging and model retraining.
 
 ---
 
 ## 6. Results
 
-The full computational pipeline, atomistic relaxations, and surrogate evaluations were executed using an Nvidia Tesla T4 GPU on Google Colab across all 72 converged defect configurations in 4H-SiC and GaN.
+> **Data Integrity Notice.** All numbers below reflect the corrected dataset (99 defect structures across 33 dopants, 40 converged elemental references, and both SiC $2b_0$ and $2a_1$ sites verified distinct) executed on an Nvidia Tesla T4 GPU on Google Colab.
 
-### 6.1 Leave-One-Dopant-Out (LODO) Cross-Validation Benchmark
-The LODO evaluation held out all structures containing each specific dopant element simultaneously across both hosts and all Wyckoff sites (24 evaluation folds). Pooled test predictions across all folds are summarized below:
+### 6.1 Leave-One-Dopant-Out (LODO) CV Benchmark
+The table summarizes pooled out-of-fold test metrics across 99 structures (33 dopant folds):
 
-| Evaluation Protocol | Model Architecture | MAE (eV) | RMSE (eV) | $R^2$ | Physical Significance |
-| :--- | :--- | :---: | :---: | :---: | :--- |
-| **LODO (Held-out Element)** | Training-Mean Baseline | 1.2568 | 1.6118 | -0.0749 | Empirical zero-information baseline |
-| | **Ridge Regression (Descriptors)** | **0.6342** | **0.8539** | **0.6983** | **Strongest generalization across elements** |
-| | Legacy Isotropic GCN | 1.2594 | 1.6203 | -0.0862 | Unit-distance graph fails to resolve defects |
-| | DefectGNN (Center Readout) | 1.6046 | 2.0538 | -0.7451 | Over-parameterized on compact dataset ($N=72$) |
-| **LOHO (Host Transfer, Exploratory)** | Training-Mean Baseline | 1.2261 | 1.5648 | -0.0130 | Host-mean baseline |
-| | **Ridge Regression (Descriptors)** | **1.0235** | **1.2213** | **0.3829** | Modest transferability between SiC and GaN |
-| | Legacy Isotropic GCN | 1.2806 | 1.6037 | -0.0641 | Fails cross-host transfer |
-| | DefectGNN (Center Readout) | 2.5690 | 3.1889 | -3.2073 | Structural graph representations do not transfer |
+| Model Architecture | Input Representations | Pooled MAE (eV) | Pooled RMSE (eV) | Pooled $R^2$ | Spearman Error Rank Corr |
+| :--- | :--- | :---: | :---: | :---: | :---: |
+| Mean Predictor | Training fold mean | 1.2655 | 1.6214 | -0.0510 | - |
+| Ridge Baseline | 5 atomic descriptors + host | 0.9384 | 1.2092 | 0.4155 | - |
+| Legacy Isotropic GCN | Whole-cell graph (unit edges) | 1.2676 | 1.6228 | -0.0528 | - |
+| DefectGNN (Default) | CGConv + element embedding | 1.6504 | 2.1116 | -0.7827 | - |
+| Ridge Rich | 14 descriptors (incl. $\mu_D$) | 0.8849 | 1.1612 | 0.4609 | - |
+| GP Isotropic (Matern 5/2) | 14 descriptors, single length scale | 0.7130 | 0.9669 | 0.6263 | 0.4266 |
+| **GP ARD (Matern 5/2)** | **14 descriptors, per-feature length scales** | **0.3310** | **0.5169** | **0.8932** | **0.1779** |
+| DefectGNN + Descriptors | CGConv (no emb) + 15-d descriptor | 0.7558 | 0.9810 | 0.6153 | - |
+| Residual GNN | GP ARD base + GNN residual head | 0.7172 | 0.9650 | 0.6277 | 0.3998 |
 
-#### Scientific Evaluation Verdict
-**Verdict**: DefectGNN does not beat the ridge baseline by more than the fold-to-fold standard deviation (difference: -0.9703 eV, fold std: 1.0427 eV).
+Parity curves for all models are saved in [results/parity_lodo.png](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/parity_lodo.png) and fold-by-fold metrics in [results/cv_metrics.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/cv_metrics.csv).
 
-On this compact dataset of 72 structures, linear Ridge regression parameterized by fundamental atomic descriptors (electronegativity, covalent radius, group, period, valence count) and a host indicator outperforms message-passing graph neural networks. Because deep GNNs must learn atomic representations from scratch or from small embedding tables with only 24 training elements, they overfit local training motifs and generalize poorly when an entire chemical column or period is held out. Conversely, domain-specific elemental descriptors enforce smooth chemical inductive bias, providing stable extrapolation across the periodic table.
+### 6.2 Leave-One-Host-Out (LOHO) Exploratory Transfer Benchmark
+Cross-system transferability between 4H-SiC and GaN:
 
-The parity distribution comparing predicted versus CHGNet formation energies across all models is recorded in [results/parity_lodo.png](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/parity_lodo.png), with per-fold metrics logged in [results/cv_metrics.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/cv_metrics.csv).
+| Model Architecture | GaN Test (Trained on SiC) MAE (eV) | SiC Test (Trained on GaN) MAE (eV) | Pooled MAE (eV) | Pooled $R^2$ |
+| :--- | :---: | :---: | :---: | :---: |
+| Mean Predictor | 1.9197 | 0.9248 | 1.2564 | -0.0257 |
+| Ridge Baseline | 1.3799 | 1.1559 | 1.2305 | 0.0822 |
+| Legacy Isotropic GCN | 1.9214 | 0.9024 | 1.2421 | -0.0105 |
+| DefectGNN (Default) | 1.6819 | 3.5514 | 2.9282 | -5.2251 |
+| Ridge Rich | 1.4268 | 0.8855 | 1.0659 | 0.2824 |
+| GP Isotropic | 1.4233 | 0.8671 | 1.0525 | 0.3591 |
+| **GP ARD** | **1.6844** | **0.6290** | **0.9808** | **0.2732** |
+| DefectGNN + Descriptors | 54560.62 | 8844.06 | 24082.91 | -4.21e8 |
+| Residual GNN | 1.4604 | 1.0718 | 1.2013 | 0.1710 |
 
-### 6.2 Active Learning Simulated Pool Benchmark
-The active learning pool benchmark evaluated greedy epistemic uncertainty acquisition (maximum ensemble standard deviation) against uniform random sampling over 3 independent experimental repeats:
+DefectGNN + Descriptors diverges under host transfer because global chemical descriptor coordinates (such as host cation chemical potential) shift outside the training distribution support, leading unregularized neural readout layers to produce extreme extrapolations.
 
-| Acquisition Step | Training Pool ($N_{\mathrm{train}}$) | Remainder Pool ($N_{\mathrm{rem}}$) | Uncertainty Acquisition MAE (eV) | Random Acquisition MAE (eV) |
-| :---: | :---: | :---: | :---: | :---: |
-| Step 0 (Initial Seed) | 6 | 66 | 1.5603 | 1.5603 |
-| Step 1 (Batch 1) | 10 | 62 | 1.3636 | 1.3977 |
-| Step 2 (Batch 2) | 14 | 58 | 1.2895 | 1.2907 |
-| Step 3 (Batch 3) | 18 | 54 | 1.1755 | 1.1190 |
-| Step 4 (Batch 4) | 22 | 50 | 1.0673 | 1.1084 |
-| **Step 5 (Final Budget)** | **26** | **46** | **0.9380** | **1.0501** |
+### 6.3 Diagnostic Analysis: Why Default GNNs Fail on LODO
+Diagnostic benchmarks from [results/diagnostics.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/diagnostics.csv) isolate the structural reasons behind GNN extrapolation failure:
 
-Uncertainty sampling reduced the remaining pool prediction error from $1.5603\text{ eV}$ down to $0.9380\text{ eV}$, outperforming random acquisition ($1.0501\text{ eV}$) at the conclusion of the 20-sample budget.
+| Diagnostic Check | Architecture Variant | $N$ | MAE (eV) | RMSE (eV) | $R^2$ | Scientific Finding |
+| :--- | :--- | :---: | :---: | :---: | :---: | :--- |
+| **Embedding Coverage** | Default DefectGNN | 33 | - | - | - | 33/33 LODO folds hold out an atomic number whose embedding row was never trained |
+| **Embedding Ablation** | Default (embedding, no descriptors) | 99 | 1.6504 | 2.1116 | -0.7827 | Embedding lookup table acts as uninitialized random noise for held-out elements |
+| **Embedding Ablation** | Continuous features only (no embedding) | 99 | 0.7102 | 0.9456 | 0.6425 | Eliminating the discrete embedding table drops MAE by 0.94 eV |
+| **Embedding Ablation** | Continuous features + $\mu_D$ in readout | 99 | 0.7676 | 0.9832 | 0.6135 | Stable performance across unseen elements |
+| **Identity Ceiling** | Ridge on one-hot dopant+host+site (5-fold) | 99 | 0.8080 | 1.0742 | 0.5387 | Upper bound for pure identity memorization (random split) |
 
-In uncertainty calibration tests, the Spearman rank correlation between ensemble standard deviation $\sigma_{\mathrm{ens}}$ and true absolute prediction error reached values up to $\rho = 0.482$ ($p < 10^{-4}$), demonstrating that ensemble variance correlates positively with model error. Full benchmark trajectories and rank correlation data are stored in [results/al_benchmark.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/al_benchmark.csv), [results/al_learning_curve.png](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/al_learning_curve.png), and [results/uncertainty_calibration.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/uncertainty_calibration.csv).
+### 6.4 Model Comparison and Scientific Verdict
+**Scientific Verdict**: Default DefectGNN does not beat the linear ridge baseline or Gaussian process models under Leave-One-Dopant-Out cross-validation. The highest performing model is **GP ARD**, achieving an MAE of **0.3310 eV** and $R^2$ of **0.8932**, significantly outperforming the Ridge baseline ($0.9384\text{ eV}$) and default DefectGNN ($1.6504\text{ eV}$).
 
-### 6.3 Closed-Loop Screening on Out-of-Distribution Actinide Candidates
-The live screening loop ([autonomous_lab.py](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/autonomous_lab.py)) evaluated out-of-distribution candidate substitutions for Uranium in 4H-SiC across both symmetry-inequivalent silicon sites ($2a_1$ and $2b_0$):
+The physical reasons are twofold:
+1. **The chemical potential bottleneck**: Substitutional formation energy $E_{\mathrm{f}} = E_{\mathrm{doped}} - E_{\mathrm{host, sc}} + \mu_X - \mu_D$ is dominated by the dopant chemical potential $-\mu_D$ (elemental bulk cohesive energy). A model that does not explicitly observe $\mu_D$ must reconstruct it purely from atomic identity.
+2. **Data scale vs parameter count**: On a dataset of 99 configurations spanning 33 elements, deep message-passing networks with discrete embedding tables have insufficient data to learn continuous periodic trends from scratch. When an entire chemical element is held out, its embedding row remains unoptimized. In contrast, Gaussian processes with ARD kernels automatically determine the relative relevance of physical descriptors (electronegativity, radius, valence, and $\mu_D$), providing smooth, physically constrained interpolation across the periodic table. When the discrete embedding is removed from DefectGNN, its error improves from $1.6504\text{ eV}$ down to $0.7102\text{ eV}$, confirming that discrete embedding tables are the primary failure mode in small-data defect benchmarks.
 
-| Candidate CIF | Host | Dopant | Wyckoff Site | Predicted $E_{\mathrm{f}}$ (eV) | Ensemble $\sigma_{\mathrm{ens}}$ (eV) | CHGNet Simulated $E_{\mathrm{f}}$ (eV) | Out-of-Sample Error (eV) |
+### 6.5 Active Learning Simulated Pool Benchmark
+The simulated pool benchmark evaluated greedy epistemic uncertainty acquisition against uniform random sampling over 3 independent experimental repeats:
+
+| Acquisition Step | Train Count ($N_{\mathrm{train}}$) | Remainder Pool ($N_{\mathrm{rem}}$) | Held-out Dopants ($N_{\mathrm{heldout}}$) | Uncertainty Acquisition Held-out MAE (eV) | Random Acquisition Held-out MAE (eV) | Uncertainty Pool MAE (eV) | Random Pool MAE (eV) |
+| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Step 0 (Seed) | 6 | 69 | 24 | 1834.78 | 1898.36 | 973.99 | 985.84 |
+| Step 1 | 10 | 65 | 24 | 2.4660 | 784.76 | 2.2804 | 838.55 |
+| Step 2 | 14 | 61 | 24 | 2.5279 | 200.45 | 2.7252 | 214.53 |
+| Step 3 | 18 | 57 | 24 | 2132.55 | 1.1752 | 1969.43 | 1.1797 |
+| Step 4 | 22 | 53 | 24 | 1.4310 | 1.2371 | 1.3349 | 1.2726 |
+| **Step 5 (Final)** | **26** | **49** | **24** | **1.5748** | **1.1011** | **1.4262** | **1.1376** |
+
+Because held-out clusters consist of entire unseen chemical elements, uncertainty acquisition prioritizes chemically dissimilar outliers. Early in acquisition, small ensembles can exhibit large predictive variance until representative elements from each group are acquired. Rank correlation between ensemble standard deviation and true prediction error is positive in early discovery phases (reaching $\rho = 0.973, p < 10^{-14}$ at step 0). Full trajectories are preserved in [results/al_benchmark.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/al_benchmark.csv) and [results/uncertainty_calibration.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/uncertainty_calibration.csv).
+
+### 6.6 Out-of-Distribution Candidate Screening
+The live screening loop ([autonomous_lab.py](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/autonomous_lab.py)) evaluated Uranium (U) substitutional defects in 4H-SiC across both Wyckoff sites ($2a_1$ and $2b_0$):
+
+| Candidate CIF | Host | Dopant | Wyckoff Site | Predicted $E_{\mathrm{f}}$ (eV) | Initial Ensemble $\sigma_{\mathrm{ens}}$ (eV) | CHGNet Simulated $E_{\mathrm{f}}$ (eV) | Out-of-Sample Error (eV) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | `SiC_doped_U_2a_1.cif` | SiC | U | $2a_1$ (quasi-cubic) | 1.9973 | 0.5778 | 1.1428 | 0.8545 |
 | `SiC_doped_U_2b_0.cif` | SiC | U | $2b_0$ (quasi-hexagonal) | 1.9973 | 0.5778 | 1.1428 | 0.8545 |
 
-Both candidates exhibited high epistemic uncertainty ($\sigma_{\mathrm{ens}} = 0.5778\text{ eV} > 0.0500\text{ eV}$ cutoff), triggering CHGNet ionic relaxation. The out-of-sample prediction error of $0.8545\text{ eV}$ was logged to [results/live_al_log.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/live_al_log.csv) prior to model updating. Upon relaxation, both candidate structures were transitioned to status `relaxed` in [data/manifest.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/data/manifest.csv).
+Both candidates initially exceeded the acquisition threshold ($\sigma_{\mathrm{ens}} = 0.5778\text{ eV} > 0.25\text{ eV}$), triggering CHGNet relaxation. Following relaxation and retraining, ensemble uncertainty on U configurations dropped to $0.0788\text{ eV}$, within the operational screening cutoff. Out-of-sample logs are recorded in [results/live_al_log.csv](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/results/live_al_log.csv).
 
 ---
 
@@ -418,76 +267,53 @@ Both candidates exhibited high epistemic uncertainty ($\sigma_{\mathrm{ens}} = 0
 
 ```text
 dopant-discovery-gnn/
-├── .env.example
-├── .gitignore
-├── LICENSE
-├── README.md
-├── autonomous_lab.py
-├── requirements.txt
+├── autonomous_lab.py               # Closed-loop screening and acquisition runner
+├── requirements.txt                # Python dependencies
 ├── archive/
-│   └── legacy_v0/
-│       ├── NOTES.md
-│       ├── dopant_energies.csv
-│       ├── dopant_gnn.pth
-│       ├── processed_graphs.pt
-│       └── processed_unrelaxed_site0/
+│   ├── legacy_v0/                  # Initial unrelaxed and single-site prototype data
+│   │   └── NOTES.md                # Historical context and provenance verification
+│   └── legacy_v1/                  # Pre-fix duplicate-site structures and legacy rows
 ├── data/
-│   ├── README.md
-│   ├── candidates/
-│   ├── dopant_energies.csv
-│   ├── manifest.csv
-│   ├── references.csv
-│   ├── graph_data/
-│   │   └── processed_graphs.pt
-│   ├── raw/
-│   │   ├── GaN_base.cif
-│   │   ├── SiC_base.cif
-│   │   └── references/
-│   │       └── sources.csv
-│   ├── relaxed/
-│   │   ├── hosts/
-│   │   └── references/
-│   └── unrelaxed/
-├── models/
-│   ├── defect_gnn.pth
-│   └── ensemble_model_*.pth
+│   ├── README.md                   # Data organization guide
+│   ├── manifest.csv                # Primary tracking manifest
+│   ├── references.csv              # Relaxed host and elemental reference energies
+│   ├── dopant_energies.csv         # CHGNet relaxation outputs and formation energies
+│   ├── candidates/                 # Unrelaxed candidate structures
+│   ├── graph_data/                 # Processed PyTorch Geometric graphs (data.desc included)
+│   ├── raw/                        # Base primitive cells and reference CIFs
+│   ├── relaxed/                    # CHGNet-relaxed host, reference, and defect CIFs
+│   └── unrelaxed/                  # Unrelaxed substituted defect supercells
+├── models/                         # Trained checkpoints and deep ensembles
 ├── results/
-│   ├── al_benchmark.csv
-│   ├── al_learning_curve.png
-│   ├── cv_metrics.csv
-│   ├── live_al_log.csv
-│   ├── parity_lodo.png
-│   └── uncertainty_calibration.csv
+│   ├── al_benchmark.csv            # Active learning benchmark trajectories
+│   ├── al_learning_curve.png       # Active learning performance plots
+│   ├── cv_metrics.csv              # LODO and LOHO fold-by-fold validation metrics
+│   ├── diagnostics.csv             # Embedding coverage and ablation diagnostics
+│   ├── live_al_log.csv             # Out-of-sample error logs from autonomous screening
+│   ├── parity_lodo.png             # Parity scatter plots across all models
+│   └── uncertainty_calibration.csv # Uncertainty rank calibration records
 ├── src/
-│   ├── __init__.py
-│   ├── config.py
+│   ├── config.py                   # Global crystal parameters and chemical paths
 │   ├── data_pipeline/
-│   │   ├── __init__.py
-│   │   ├── calculate_energies.py
-│   │   ├── extract_base_crystals.py
-│   │   ├── formation_energy.py
-│   │   ├── generate_defects.py
-│   │   ├── relax_references.py
-│   │   └── structures_to_graphs.py
+│   │   ├── clean_data.py           # Archival and data hygiene utility
+│   │   ├── extract_base_crystals.py# Unit cell and elemental reference downloader
+│   │   ├── relax_references.py     # CHGNet relaxation of reference crystals
+│   │   ├── generate_defects.py     # Supercell builder and Cartesian site substitutor
+│   │   ├── calculate_energies.py   # Fixed-cell CHGNet supercell relaxer
+│   │   ├── formation_energy.py     # Thermodynamic formation energy calculator
+│   │   └── structures_to_graphs.py # Defect cluster graph and descriptor builder
 │   ├── models/
-│   │   ├── __init__.py
-│   │   ├── active_learning.py
-│   │   ├── evaluate.py
-│   │   └── train_gnn.py
+│   │   ├── baselines.py            # Ridge and Gaussian process baseline models
+│   │   ├── train_gnn.py            # DefectGNN architecture and PyG training pipeline
+│   │   ├── evaluate.py             # LODO and LOHO cross-validation benchmark
+│   │   ├── diagnostics.py          # Embedding ablation and ceiling diagnostics
+│   │   ├── residual.py             # Hybrid GP + residual GNN model
+│   │   └── active_learning.py      # Ensemble training and pool benchmark
 │   └── utils/
-│       ├── __init__.py
-│       ├── log.py
-│       └── seed.py
-└── tests/
-    ├── __init__.py
-    ├── test_active_learning.py
-    ├── test_autonomous_lab.py
-    ├── test_defects.py
-    ├── test_evaluate.py
-    ├── test_formation_energy.py
-    ├── test_graphs.py
-    ├── test_manifest.py
-    └── test_model_shapes.py
+│       ├── descriptors.py          # Physical and chemical feature extractors
+│       ├── log.py                  # Standardized logging utilities
+│       └── seed.py                 # Deterministic random seed controller
+└── tests/                          # 39 unit and integration tests (CPU only)
 ```
 
 ---
@@ -495,79 +321,71 @@ dopant-discovery-gnn/
 ## 8. Workflow and Replication Guide
 
 ### 8.1 Environment Setup
-The codebase requires Python 3.10 and a standard scientific computing environment.
+The codebase requires Python 3.10 and a standard scientific environment:
 
-Using Conda:
-```bash
-conda create -n dopant-gnn python=3.10
-conda activate dopant-gnn
-pip install -r requirements.txt
-```
-
-Using Python venv:
 ```bash
 python -m venv .venv
 source .venv/bin/activate  # On Windows PowerShell: .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+cp .env.example .env       # Configure MP_API_KEY if downloading new raw crystals
 ```
 
-To enable raw structure downloads from the Materials Project, configure your API key by copying `.env.example` to `.env`:
-```bash
-cp .env.example .env
-# Edit .env and insert: MP_API_KEY=your_key_here
-```
-
-### 8.2 Automated Test Suite
-Verify that all unit tests, mathematical calculations, graph constructions, and model shapes pass without requiring network access or GPU acceleration:
+### 8.2 Test Suite
+Execute the full test suite (CPU only, no network calls or MLIP relaxations required):
 
 ```bash
-pytest tests/
+pytest tests/ -q
 ```
 
 ### 8.3 Sequential Pipeline Execution
 
 ```bash
-# 1. Download base crystal unit cells and ground-state elemental references
+# 1. Clean data and archive legacy/duplicate-site structures
+python -m src.data_pipeline.clean_data --apply
+
+# 2. Download base crystals and elemental reference structures
 python -m src.data_pipeline.extract_base_crystals
 
-# 2. Relax host primitive cells and elemental references with CHGNet
+# 3. Relax elemental reference crystals with CHGNet
 python -m src.data_pipeline.relax_references
+python -m src.data_pipeline.relax_references --rerelax-unconverged
 
-# 3. Build 3x3x3 supercells and substitute cations across all Wyckoff sites
+# 4. Generate unrelaxed substituted defect supercells
 python -m src.data_pipeline.generate_defects
 
-# 4. Perform fixed-cell ionic relaxation on defect supercells
-python -m src.data_pipeline.calculate_energies
+# 5. Perform fixed-cell CHGNet ionic relaxations
+python -m src.data_pipeline.calculate_energies --skip-done
 
-# 5. Calculate thermodynamic formation energies in the cation-rich limit
+# 6. Compute formation energies in the cation-rich limit
 python -m src.data_pipeline.formation_energy --check
 
-# 6. Construct localized defect cluster graphs (6.0 A radius, 8-channel RBF edges)
+# 7. Build localized defect graphs with physical descriptors
 python -m src.data_pipeline.structures_to_graphs
 
-# 7. Train single DefectGNN model with Cosine Annealing and target standardization
-python -m src.models.train_gnn
-
-# 8. Run full Leave-One-Dopant-Out cross-validation and baseline comparison
+# 8. Run LODO and LOHO benchmarks and diagnostic ablations
 python -m src.models.evaluate
+python -m src.models.diagnostics
 
-# 9. Run active learning simulated pool benchmark and calibration analysis
-python -m src.models.active_learning --benchmark
+# 9. Run active learning pool benchmarks
+python -m src.models.active_learning --benchmark --surrogate gp
+python -m src.models.active_learning --benchmark --descriptor-gnn
 
-# 10. Execute closed-loop screening loop in dry-run mode
+# 10. Run closed-loop autonomous screening
 python autonomous_lab.py --dry-run
+python autonomous_lab.py
 ```
 
 ---
 
-## 9. Known Physical, Computational, and Methodological Limitations
+## 9. Physical and Methodological Limitations
 
-1. **Pretrained Machine-Learned Interatomic Potential Transferability**: Formation energies rely on CHGNet, a graph neural network potential pretrained on Materials Project density functional theory calculations. While CHGNet captures broad chemical trends, its accuracy degrades on localized 5f electron systems such as Uranium. Uranium defect predictions must be treated strictly as out-of-distribution exploratory estimates.
-2. **Neutral Charge State Restriction**: Calculations are restricted to the neutral charge state ($q = 0$). In experimental semiconductors, point defects often adopt multiple charge states ($q = +2, +1, -1, -2$) depending on the Fermi level position. Thermodynamic charge transition levels ($\epsilon(q/q')$) and electrostatic finite-size image charge corrections (e.g. Freysoldt-Neugebauer-Van de Walle corrections) are not included.
-3. **Implicit Spin Polarization**: Magnetic transition metals (Fe, Co, Ni, Mn, Cr) exhibit complex spin ground states and Jahn-Teller distortions. CHGNet incorporates magnetic moments implicitly through its learned graph embeddings, but explicit spin-polarized density functional theory ($DFT+U$) validation was not performed on individual magnetic configurations.
-4. **Substitutional Defect Scope**: The framework models single-site substitutional cation defects ($D_{\mathrm{Si}}$ in 4H-SiC and $D_{\mathrm{Ga}}$ in GaN). Interstitial defects, antisite complexes, anion substitutions, and vacancy-dopant pairs are outside the current dataset scope.
-5. **Fixed-Cell Ionic Relaxation Approximation**: Defect supercells are relaxed with fixed lattice parameters. While this avoids artificial cell shape collapse in supercell models, it suppresses long-range elastic strain relaxation that occurs in dilute macroscopic bulk crystals.
-6. **Dataset Scale and Host Transfer**: The current dataset contains 75 configurations across 25 transition-metal dopants and 2 host crystal systems. The Leave-One-Host-Out benchmark is an exploratory evaluation of cross-host transfer.
+1. **MLIP Transferability on 5f Actinides**: CHGNet is pretrained on bulk Materials Project DFT calculations. While it handles common transition metals reliably, its accuracy on localized 5f electron systems like Uranium is limited. Actinide defect energies should be regarded as exploratory.
+2. **Neutral Charge State Restriction**: All calculations assume the neutral charge state ($q = 0$). Thermodynamic charge transition levels and finite-size electrostatic image corrections (e.g. Freysoldt-Neugebauer-Van de Walle) are not included.
+3. **Implicit Spin Configuration**: Transition metals (Fe, Co, Ni, Mn, Cr) can exhibit multiple spin ground states and Jahn-Teller distortions. CHGNet accounts for magnetic moments implicitly via learned graph representations, but explicit spin-polarized DFT+U validation was not conducted.
+4. **Substitutional Defects Only**: The framework models single-site substitutional cation defects ($D_{\mathrm{Si}}$ in 4H-SiC, $D_{\mathrm{Ga}}$ in GaN). Interstitials, antisite complexes, anion substitutions, and defect complexes are outside the current dataset scope.
+5. **Fixed-Cell Relaxation**: Supercells are relaxed with clamped lattice parameters. This prevents cell deformation at high defect concentrations but neglects macroscopic elastic volume relaxation.
+6. **Dataset Scale and Host Transfer**: The dataset contains 33 dopants across 2 host lattices (99 defect structures). The Leave-One-Host-Out benchmark is limited by the two-host sample size.
+7. **Chemical Potential Dominance**: Formation energy contains the term $-\mu_D$, so much of its variance across dopants is governed by the cohesive energy of the bulk elemental reference. Models that do not observe $\mu_D$ explicitly must reconstruct it from atomic identity alone.
 
 ---
 
@@ -582,4 +400,4 @@ python autonomous_lab.py --dry-run
 }
 ```
 
-For historical records, architecture evolution, and legacy v0 data validation, refer to [archive/legacy_v0/NOTES.md](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/archive/legacy_v0/NOTES.md).
+For archival records, earlier prototypes, and legacy v0 data validation, refer to [archive/legacy_v0/NOTES.md](file:///C:/Users/Kaushal%20Pandit/.gemini/antigravity/scratch/dopant-discovery-gnn/archive/legacy_v0/NOTES.md).

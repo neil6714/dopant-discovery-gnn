@@ -21,7 +21,10 @@ from src.data_pipeline.structures_to_graphs import (
     build_graph_from_cif,
     process_cif_directory,
 )
+from src.data_pipeline.structures_to_graphs import attach_descriptors
+from src.models.baselines import DescriptorModel
 from src.models.train_gnn import DefectGNN, DopantGNN
+from pymatgen.core import Element
 from src.utils.log import get_logger
 from src.utils.seed import set_seed
 
@@ -33,6 +36,10 @@ try:
         torch.serialization.add_safe_globals([Data])
 except Exception:
     pass
+
+# Options for the descriptor-only DefectGNN (see DefectGNN docstring). global_dim must match
+# the length of data.desc, i.e. len(RICH_FEATURE_NAMES).
+DESCRIPTOR_GNN_KWARGS = {"use_embedding": False, "global_dim": 15, "batch_norm": False, "dropout": 0.1}
 
 # Module-level cache so ensemble checkpoints are read once rather than per call
 _CACHED_ENSEMBLE_MODELS: Optional[List[torch.nn.Module]] = None
@@ -48,6 +55,7 @@ def _instantiate_and_load_checkpoint(ckpt: Any, device: Optional[torch.device] =
         in_feat = cfg.get("in_features", 9)
         hidden_dim = cfg.get("hidden_dim", 64)
         edge_dim = cfg.get("edge_dim", 8)
+        model_kwargs = cfg.get("model_kwargs", {}) or {}
     else:
         state_dict = ckpt
         y_mean = 0.0
@@ -55,6 +63,7 @@ def _instantiate_and_load_checkpoint(ckpt: Any, device: Optional[torch.device] =
         in_feat = 1
         hidden_dim = 64
         edge_dim = 8
+        model_kwargs = {}
 
     # Deduce hidden_dim from state_dict if available
     if "node_proj.weight" in state_dict:
@@ -68,7 +77,7 @@ def _instantiate_and_load_checkpoint(ckpt: Any, device: Optional[torch.device] =
     )
 
     if is_defect:
-        model = DefectGNN(in_features=in_feat, hidden_dim=hidden_dim, edge_dim=edge_dim)
+        model = DefectGNN(in_features=in_feat, hidden_dim=hidden_dim, edge_dim=edge_dim, **model_kwargs)
     else:
         if "embedding.weight" in state_dict:
             in_feat = state_dict["embedding.weight"].size(1)
@@ -211,6 +220,27 @@ def _load_graphs_dataset(data_path: Optional[str] = None) -> List[Data]:
     return []
 
 
+def _cluster_bootstrap(graphs: List[Data], rng: np.random.Generator) -> np.ndarray:
+    """Bootstrap indices that resample whole dopant elements, not single structures.
+
+    One dopant appears in several structures (both hosts, both SiC sites). Resampling single
+    structures leaves a twin of almost every point in each member's training set, so the
+    members agree and the ensemble std is too small exactly where the model has not seen a
+    new element. Resampling elements keeps that spread. Falls back to plain resampling when
+    graphs carry no dopant label.
+    """
+    n = len(graphs)
+    labels = [getattr(g, "dopant_z", None) for g in graphs]
+    if any(l is None for l in labels):
+        return rng.choice(n, size=n, replace=True)
+    labels = np.array([int(l) for l in labels])
+    unique = np.unique(labels)
+    if len(unique) < 2:
+        return rng.choice(n, size=n, replace=True)
+    drawn = rng.choice(unique, size=len(unique), replace=True)
+    return np.concatenate([np.where(labels == d)[0] for d in drawn])
+
+
 class ActiveLearningLoop:
     """Active learning workflow using a bootstrapped GNN ensemble."""
 
@@ -239,6 +269,7 @@ class ActiveLearningLoop:
         batch_size: int = 4,
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
+        model_kwargs: Optional[Dict[str, Any]] = None,
     ) -> List[torch.nn.Module]:
         """Train independent models with distinct seeds, target standardisation, and bootstrapped sampling."""
         global _CACHED_ENSEMBLE_MODELS
@@ -255,13 +286,20 @@ class ActiveLearningLoop:
         in_feat = self.training_pool[0].x.size(-1) if self.training_pool[0].x is not None else 9
         use_defect_gnn = in_feat >= 6
 
+        # Default to the descriptor-aware GNN when graphs have descriptors (see CONFIG)
+        if model_kwargs is None and use_defect_gnn and CONFIG.use_descriptor_gnn:
+            if all(getattr(g, "dopant_z", None) is not None for g in self.training_pool):
+                attach_descriptors(self.training_pool, CONFIG.references_csv_path)
+            if all(getattr(g, "desc", None) is not None for g in self.training_pool):
+                model_kwargs = dict(CONFIG.descriptor_gnn_kwargs)
+
         for i in range(num_models):
             member_seed = 42 + i
             set_seed(member_seed)
 
             # Bootstrapped sampling with replacement using numpy Generator seeded per member
             rng = np.random.default_rng(member_seed)
-            bootstrap_indices = rng.choice(n_samples, size=n_samples, replace=True)
+            bootstrap_indices = _cluster_bootstrap(self.training_pool, rng)
             bootstrap_subset = [self.training_pool[idx] for idx in bootstrap_indices]
 
             # Target standardisation fitted on the bootstrap sample
@@ -274,7 +312,8 @@ class ActiveLearningLoop:
                 y_std = 1.0
 
             if use_defect_gnn:
-                model = DefectGNN(in_features=in_feat, hidden_dim=64, edge_dim=8)
+                model = DefectGNN(in_features=in_feat, hidden_dim=64, edge_dim=8, **(model_kwargs or {}))
+                model.fit_desc_scaler(bootstrap_subset)
             else:
                 model = DopantGNN(in_features=in_feat, hidden_dim=64)
 
@@ -310,6 +349,7 @@ class ActiveLearningLoop:
                     "lr": lr,
                     "weight_decay": weight_decay,
                     "epochs": epochs,
+                    "model_kwargs": dict(model_kwargs or {}),
                 },
                 "y_mean": y_mean,
                 "y_std": y_std,
@@ -337,6 +377,7 @@ def _train_transient_ensemble(
     batch_size: int = 4,
     seed_base: int = 42,
     device: Optional[torch.device] = None,
+    model_kwargs: Optional[Dict[str, Any]] = None,
 ) -> List[torch.nn.Module]:
     """Train transient in-memory ensemble members for pool benchmark iterations."""
     if device is None:
@@ -352,7 +393,7 @@ def _train_transient_ensemble(
         set_seed(m_seed)
         m_rng = np.random.default_rng(m_seed)
 
-        boot_idx = m_rng.choice(n_train, size=n_train, replace=True)
+        boot_idx = _cluster_bootstrap(train_graphs, m_rng)
         boot_subset = [train_graphs[b] for b in boot_idx]
 
         targets = [float(g.y.item()) for g in boot_subset if g.y is not None]
@@ -364,7 +405,8 @@ def _train_transient_ensemble(
             y_std = 1.0
 
         if use_defect_gnn:
-            model = DefectGNN(in_features=in_feat, hidden_dim=64, edge_dim=8)
+            model = DefectGNN(in_features=in_feat, hidden_dim=64, edge_dim=8, **(model_kwargs or {}))
+            model.fit_desc_scaler(boot_subset)
         else:
             model = DopantGNN(in_features=in_feat, hidden_dim=64)
 
@@ -399,36 +441,99 @@ def plot_learning_curve(
     df_benchmark: pd.DataFrame,
     save_path: str = "results/al_learning_curve.png",
 ) -> None:
-    """Plot mean remainder MAE across acquisition steps with shaded error spread."""
+    """Plot mean held-out MAE across acquisition steps with shaded spread over repeats."""
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     fig, ax = plt.subplots(figsize=(8, 5.5))
 
-    colors = {"uncertainty": "#1f77b4", "random": "#ff7f0e"}
+    df = df_benchmark.copy()
+    if "surrogate" not in df.columns:
+        df["surrogate"] = "ensemble"
+    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b"]
 
-    for strat in sorted(df_benchmark["strategy"].unique()):
-        sub_df = df_benchmark[df_benchmark["strategy"] == strat]
+    for k, ((surr, strat), sub_df) in enumerate(sorted(df.groupby(["surrogate", "strategy"]))):
         grouped = sub_df.groupby("n_train")["mae_ev"].agg(["mean", "std"]).sort_index()
-
         x = grouped.index.to_numpy()
         mean_mae = grouped["mean"].to_numpy()
         std_mae = grouped["std"].fillna(0.0).to_numpy()
-
-        c = colors.get(strat, "#2ca02c")
-        label = f"{strat.capitalize()} Acquisition"
-
-        ax.plot(x, mean_mae, marker="o", linewidth=2, color=c, label=label)
-        ax.fill_between(x, mean_mae - std_mae, mean_mae + std_mae, color=c, alpha=0.18)
+        c = palette[k % len(palette)]
+        ax.plot(x, mean_mae, marker="o", linewidth=2, color=c, label=f"{surr} / {strat}")
+        ax.fill_between(x, mean_mae - std_mae, mean_mae + std_mae, color=c, alpha=0.15)
 
     ax.set_xlabel("Acquired Training Set Size", fontsize=11)
-    ax.set_ylabel("Remainder Pool MAE (eV)", fontsize=11)
-    ax.set_title("Active Learning Simulated Oracle Benchmark", fontsize=12, fontweight="medium")
+    ax.set_ylabel("Held-out MAE (eV)", fontsize=11)
+    ax.set_title("Active Learning Pool Benchmark", fontsize=12, fontweight="medium")
     ax.grid(True, linestyle="dotted", alpha=0.5)
-    ax.legend(frameon=True, fontsize=10)
+    ax.legend(frameon=True, fontsize=9)
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=300)
     plt.close(fig)
     logger.info("Saved learning curve plot to %s", save_path)
+
+
+def _dopant_symbol(g: Data) -> str:
+    """Dopant element symbol of a graph."""
+    return Element.from_Z(int(g.dopant_z)).symbol
+
+
+def _ensemble_predict(
+    ensemble: List[torch.nn.Module], graphs: List[Data], device: torch.device
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Mean and std (eV) of an ensemble over a list of graphs."""
+    means, stds = [], []
+    for g in graphs:
+        batch = Batch.from_data_list([g]).to(device)
+        vals = []
+        with torch.no_grad():
+            for model in ensemble:
+                vals.append(float(model(batch).view(-1).item() * model.y_std + model.y_mean))
+        means.append(np.mean(vals))
+        stds.append(np.std(vals, ddof=1) if len(vals) > 1 else 0.0)
+    return np.array(means), np.array(stds)
+
+
+def _desc_matrix(graphs: List[Data]) -> np.ndarray:
+    return np.stack([g.desc.view(-1).cpu().numpy() for g in graphs]).astype(np.float64)
+
+
+def _fit_and_predict(
+    surrogate: str,
+    train_graphs: List[Data],
+    query_sets: List[List[Data]],
+    num_models: int,
+    epochs: int,
+    batch_size: int,
+    seed_base: int,
+    device: torch.device,
+    model_kwargs: Optional[Dict[str, Any]],
+) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Train the surrogate on train_graphs and return (mean, std) for each query set."""
+    if surrogate == "gp":
+        y = np.array([float(g.y.item()) for g in train_graphs])
+        groups = np.array([_dopant_symbol(g) for g in train_graphs])
+        gp = DescriptorModel("gp_iso", seed=seed_base).fit(_desc_matrix(train_graphs), y, groups)
+        outputs = []
+        for graphs in query_sets:
+            if not graphs:
+                outputs.append((np.array([]), np.array([])))
+                continue
+            mean, std = gp.predict(_desc_matrix(graphs))
+            outputs.append((mean, std))
+        return outputs
+
+    ensemble = _train_transient_ensemble(
+        train_graphs=train_graphs,
+        num_models=num_models,
+        epochs=epochs,
+        batch_size=batch_size,
+        seed_base=seed_base,
+        device=device,
+        model_kwargs=model_kwargs,
+    )
+    return [
+        _ensemble_predict(ensemble, graphs, device) if graphs else (np.array([]), np.array([]))
+        for graphs in query_sets
+    ]
 
 
 def run_pool_benchmark(
@@ -446,160 +551,139 @@ def run_pool_benchmark(
     output_plot: str = "results/al_learning_curve.png",
     output_calibration_csv: str = "results/uncertainty_calibration.csv",
     device: Optional[torch.device] = None,
+    holdout_by: str = "dopant",
+    holdout_fraction: float = 0.25,
+    surrogate: str = "ensemble",
+    model_kwargs: Optional[Dict[str, Any]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Execute pool-based active learning simulated oracle benchmark.
+    """Pool-based active learning benchmark with a simulated oracle.
 
-    Evaluates greedy acquisition by maximum ensemble uncertainty versus random selection,
-    recording untouched remainder pool MAE and calibration Spearman correlation.
+    Compares acquisition by maximum predictive std against random acquisition.
+
+    holdout_by="dopant" reserves whole dopant elements as a fixed test set per repeat, so the
+    score is comparable with leave-one-dopant-out CV. The older behaviour, scoring on the
+    unacquired remainder (holdout_by="none"), lets a dopant sit in both train and test through
+    its other site or host, which flatters every model. It is still reported as mae_pool_ev.
+
+    surrogate="ensemble" uses the bootstrapped GNN ensemble, "gp" a Gaussian process on the
+    graph-level descriptors.
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if surrogate not in ("ensemble", "gp"):
+        raise ValueError("surrogate must be 'ensemble' or 'gp'")
 
     if dataset is None:
         dataset = _load_graphs_dataset(data_path)
 
-    # Filter out graphs missing labels or marked as out-of-distribution
-    valid_dataset = [
-        g for g in dataset
-        if g.y is not None and not getattr(g, "ood_flag", False)
-    ]
+    valid_dataset = [g for g in dataset if g.y is not None and not getattr(g, "ood_flag", False)]
+    if surrogate == "gp" or (model_kwargs or {}).get("global_dim", 0) > 0:
+        attach_descriptors(valid_dataset, CONFIG.references_csv_path)
 
-    total_pool_size = len(valid_dataset)
-    if total_pool_size < seed_size + batch_size:
-        logger.warning(
-            "Valid dataset size %d too small for seed_size=%d and batch_size=%d",
-            total_pool_size,
-            seed_size,
-            batch_size,
-        )
-        print(f"Dataset size {total_pool_size} too small to run benchmark.")
-        return pd.DataFrame(), pd.DataFrame()
+    dopants_all = sorted({_dopant_symbol(g) for g in valid_dataset})
+    n_test_dopants = max(1, int(round(holdout_fraction * len(dopants_all)))) if holdout_by == "dopant" else 0
 
     strategies_to_run = (
         ["uncertainty", "random"] if strategy.lower() in ["both", "all"] else [strategy.lower()]
     )
-
     benchmark_rows: List[Dict[str, Any]] = []
     calibration_rows: List[Dict[str, Any]] = []
 
     print(
-        f"Starting active learning pool benchmark: {len(valid_dataset)} samples, "
-        f"seed={seed_size}, batch={batch_size}, budget={budget}, repeats={n_repeats}"
+        f"Active learning pool benchmark: {len(valid_dataset)} structures, {len(dopants_all)} dopants, "
+        f"surrogate={surrogate}, holdout_by={holdout_by}, seed={seed_size}, batch={batch_size}, "
+        f"budget={budget}, repeats={n_repeats}"
     )
 
     for strat in strategies_to_run:
         print(f"\nAcquisition Strategy: {strat.upper()}")
 
         for repeat_idx in range(n_repeats):
-            run_rng = np.random.default_rng(seed + repeat_idx * 1000)
+            # The split depends on the repeat only, so both strategies see identical folds
+            split_rng = np.random.default_rng(seed + repeat_idx * 1000)
+            run_rng = np.random.default_rng(seed + repeat_idx * 1000 + (1 if strat == "random" else 2))
 
-            # Draw initial seed indices
-            all_indices = list(range(total_pool_size))
-            seed_indices = list(run_rng.choice(total_pool_size, size=seed_size, replace=False))
-            acquired_indices = list(seed_indices)
-            candidate_indices = [idx for idx in all_indices if idx not in acquired_indices]
+            test_dopants = (
+                set(split_rng.choice(dopants_all, size=n_test_dopants, replace=False).tolist())
+                if n_test_dopants
+                else set()
+            )
+            test_graphs = [g for g in valid_dataset if _dopant_symbol(g) in test_dopants]
+            pool = [g for g in valid_dataset if _dopant_symbol(g) not in test_dopants]
 
-            max_acquired = min(seed_size + budget, total_pool_size - 1)
-            step_count = 0
+            if len(pool) < seed_size + batch_size:
+                print(f"Pool of {len(pool)} too small for seed_size={seed_size}; skipping repeat.")
+                continue
+
+            acquired = list(split_rng.choice(len(pool), size=seed_size, replace=False))
+            candidates = [i for i in range(len(pool)) if i not in acquired]
+            max_acquired = min(seed_size + budget, len(pool) - 1)
+            step = 0
 
             while True:
-                train_graphs = [valid_dataset[i] for i in acquired_indices]
-                remainder_graphs = [valid_dataset[i] for i in candidate_indices]
+                train_graphs = [pool[i] for i in acquired]
+                cand_graphs = [pool[i] for i in candidates]
 
-                # Train ensemble on acquired indices
-                ensemble = _train_transient_ensemble(
-                    train_graphs=train_graphs,
-                    num_models=num_models,
-                    epochs=epochs,
-                    batch_size=batch_size,
-                    seed_base=seed + repeat_idx * 1000 + step_count * 100,
-                    device=device,
+                (cand_mean, cand_std), (test_mean, test_std) = _fit_and_predict(
+                    surrogate, train_graphs, [cand_graphs, test_graphs], num_models, epochs,
+                    batch_size, seed + repeat_idx * 1000 + step * 100, device, model_kwargs,
                 )
 
-                # Evaluate on untouched remainder
-                rem_preds: List[float] = []
-                rem_stds: List[float] = []
-                rem_targets: List[float] = []
+                cand_true = np.array([float(g.y.item()) for g in cand_graphs])
+                pool_err = np.abs(cand_mean - cand_true)
+                if len(test_graphs):
+                    test_true = np.array([float(g.y.item()) for g in test_graphs])
+                    eval_err = np.abs(test_mean - test_true)
+                    eval_std = test_std
+                else:
+                    eval_err, eval_std = pool_err, cand_std
 
-                for rem_g in remainder_graphs:
-                    batch = Batch.from_data_list([rem_g]).to(device)
-                    member_vals: List[float] = []
-                    for model in ensemble:
-                        with torch.no_grad():
-                            out = model(batch)
-                            val_ev = float(out.view(-1).item() * model.y_std + model.y_mean)
-                            member_vals.append(val_ev)
-                    mean_val = float(np.mean(member_vals))
-                    std_val = float(np.std(member_vals, ddof=1)) if len(member_vals) > 1 else 0.0
-
-                    rem_preds.append(mean_val)
-                    rem_stds.append(std_val)
-                    rem_targets.append(float(rem_g.y.item()))
-
-                preds_arr = np.array(rem_preds, dtype=np.float64)
-                targets_arr = np.array(rem_targets, dtype=np.float64)
-                stds_arr = np.array(rem_stds, dtype=np.float64)
-                abs_errors = np.abs(preds_arr - targets_arr)
-
-                mae = float(np.mean(abs_errors))
-                rmse = float(np.sqrt(np.mean((preds_arr - targets_arr) ** 2)))
-
+                mae = float(np.mean(eval_err))
+                rmse = float(np.sqrt(np.mean(eval_err**2)))
                 benchmark_rows.append({
                     "strategy": strat,
+                    "surrogate": surrogate,
                     "repeat": repeat_idx,
-                    "step": step_count,
-                    "n_train": len(acquired_indices),
-                    "n_remainder": len(candidate_indices),
+                    "step": step,
+                    "n_train": len(acquired),
+                    "n_remainder": len(candidates),
+                    "n_heldout": len(test_graphs),
                     "mae_ev": mae,
                     "rmse_ev": rmse,
+                    "mae_pool_ev": float(np.mean(pool_err)),
                 })
 
-                # Compute Spearman rank correlation between ensemble std and absolute error
-                if len(stds_arr) > 2 and np.var(stds_arr) > 1e-8 and np.var(abs_errors) > 1e-8:
-                    spearman_res = stats.spearmanr(stds_arr, abs_errors)
-                    spearman_corr = float(spearman_res.statistic)
-                    p_val = float(spearman_res.pvalue)
+                if len(eval_std) > 2 and np.var(eval_std) > 1e-8 and np.var(eval_err) > 1e-8:
+                    res = stats.spearmanr(eval_std, eval_err)
+                    rho, p_val = float(res.statistic), float(res.pvalue)
                 else:
-                    spearman_corr = float("nan")
-                    p_val = float("nan")
-
+                    rho, p_val = float("nan"), float("nan")
                 calibration_rows.append({
                     "strategy": strat,
+                    "surrogate": surrogate,
                     "repeat": repeat_idx,
-                    "step": step_count,
-                    "n_samples": len(remainder_graphs),
-                    "spearman_corr": spearman_corr,
+                    "step": step,
+                    "n_samples": len(eval_err),
+                    "spearman_corr": rho,
                     "p_value": p_val,
                 })
-
                 print(
-                    f"  [{strat}] Repeat {repeat_idx + 1}/{n_repeats} | "
-                    f"Step {step_count}: N_train={len(acquired_indices)}, "
-                    f"Remainder MAE={mae:.4f} eV, Spearman rho={spearman_corr:.3f}"
+                    f"  [{strat}/{surrogate}] repeat {repeat_idx + 1}/{n_repeats} step {step}: "
+                    f"N_train={len(acquired)}, held-out MAE={mae:.4f} eV, rho={rho:.3f}"
                 )
 
-                # Check termination
-                if len(acquired_indices) >= max_acquired or len(candidate_indices) == 0:
+                if len(acquired) >= max_acquired or not candidates:
                     break
-
-                n_to_acquire = min(batch_size, len(candidate_indices))
-                if n_to_acquire <= 0:
-                    break
-
-                if strat == "random":
-                    selected = list(run_rng.choice(candidate_indices, size=n_to_acquire, replace=False))
-                elif strat == "uncertainty":
-                    cand_rankings = list(zip(candidate_indices, rem_stds))
-                    cand_rankings.sort(key=lambda x: x[1], reverse=True)
-                    selected = [item[0] for item in cand_rankings[:n_to_acquire]]
+                n_to_acquire = min(batch_size, len(candidates))
+                if strat == "uncertainty":
+                    order = np.argsort(-cand_std)[:n_to_acquire]
+                    selected = [candidates[k] for k in order]
                 else:
-                    selected = list(run_rng.choice(candidate_indices, size=n_to_acquire, replace=False))
-
-                for sel_idx in selected:
-                    candidate_indices.remove(sel_idx)
-                    acquired_indices.append(sel_idx)
-
-                step_count += 1
+                    selected = list(run_rng.choice(candidates, size=n_to_acquire, replace=False))
+                for sel in selected:
+                    candidates.remove(sel)
+                    acquired.append(sel)
+                step += 1
 
     df_benchmark = pd.DataFrame(benchmark_rows)
     df_calibration = pd.DataFrame(calibration_rows)
@@ -607,7 +691,6 @@ def run_pool_benchmark(
     os.makedirs(os.path.dirname(output_csv) or ".", exist_ok=True)
     df_benchmark.to_csv(output_csv, index=False)
     print(f"\nSaved benchmark metrics to {output_csv}")
-
     os.makedirs(os.path.dirname(output_calibration_csv) or ".", exist_ok=True)
     df_calibration.to_csv(output_calibration_csv, index=False)
     print(f"Saved uncertainty calibration metrics to {output_calibration_csv}")
@@ -673,6 +756,25 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Number of ensemble members.",
     )
     parser.add_argument(
+        "--surrogate",
+        type=str,
+        default="ensemble",
+        choices=["ensemble", "gp"],
+        help="Model used for predictions and acquisition in the benchmark.",
+    )
+    parser.add_argument(
+        "--holdout-by",
+        type=str,
+        default="dopant",
+        choices=["dopant", "none"],
+        help="Score on whole held-out dopants (default) or on the unacquired remainder.",
+    )
+    parser.add_argument(
+        "--descriptor-gnn",
+        action="store_true",
+        help="Use the descriptor-only DefectGNN (no element embedding, descriptors in readout).",
+    )
+    parser.add_argument(
         "--data-path",
         type=str,
         default=CONFIG.graph_data_path,
@@ -711,6 +813,9 @@ def main(argv: Optional[List[str]] = None) -> None:
             output_csv=args.output_csv,
             output_plot=args.output_plot,
             output_calibration_csv=args.output_calibration,
+            surrogate=args.surrogate,
+            holdout_by=args.holdout_by,
+            model_kwargs=DESCRIPTOR_GNN_KWARGS if args.descriptor_gnn else None,
         )
     else:
         # Default behavior: train ensemble

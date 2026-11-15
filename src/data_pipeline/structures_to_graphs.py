@@ -13,6 +13,7 @@ from torch_geometric.data import Data
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from src.config import CONFIG
+from src.utils.descriptors import rich_descriptor
 
 # PyTorch 2.6+ compatibility for saving/loading PyG Data objects safely
 try:
@@ -98,6 +99,7 @@ def build_graph_from_cif(
     num_rbf: int = 8,
     rbf_min: float = 0.5,
     rbf_max: float = 6.0,
+    references_csv: str = "data/references.csv",
 ) -> Data:
     """Construct defect-centered cluster graph representation with RBF edge features.
 
@@ -110,9 +112,11 @@ def build_graph_from_cif(
         num_rbf: Number of Gaussian RBF centers.
         rbf_min: Minimum distance center in Angstroms.
         rbf_max: Maximum distance center in Angstroms.
+        references_csv: Elemental reference energies, used for the mu_dopant descriptor.
 
     Returns:
-        PyG Data object with node features, edge indices, RBF edge attributes, and metadata.
+        PyG Data object with node features, edge indices, RBF edge attributes, a graph-level
+        descriptor vector (desc), and metadata.
     """
     struct = Structure.from_file(cif_path)
     filename = os.path.basename(cif_path)
@@ -224,7 +228,40 @@ def build_graph_from_cif(
     data.ood_flag = ood_flag
     data.converged_all = converged_all
 
+    # Graph-level dopant descriptors (same vector the ridge and GP baselines use)
+    dopant_name = dopant_symbol or str(site_symbol(dopant_site))
+    data.desc = torch.tensor(
+        rich_descriptor(dopant_name, host, site_str, references_csv=references_csv),
+        dtype=torch.float,
+    ).unsqueeze(0)
+
     return data
+
+
+def attach_descriptors(
+    graphs: List[Data],
+    references_csv: str = "data/references.csv",
+    overwrite: bool = False,
+) -> List[Data]:
+    """Add the graph-level descriptor vector to graphs that were built before it existed.
+
+    The descriptor only depends on dopant, host, site and the elemental reference energy,
+    so stored graphs can be upgraded without the CIF files.
+    """
+    from pymatgen.core import Element
+
+    for g in graphs:
+        if getattr(g, "desc", None) is not None and not overwrite:
+            continue
+        dopant = Element.from_Z(int(g.dopant_z)).symbol
+        vec = rich_descriptor(dopant, str(g.host), str(getattr(g, "site", "")), references_csv=references_csv)
+        g.desc = torch.tensor(vec, dtype=torch.float).unsqueeze(0)
+    return graphs
+
+
+def site_symbol(site) -> str:
+    """Element symbol of a pymatgen site."""
+    return site.species.elements[0].symbol
 
 
 def cif_to_graph(cif_path: str, energy_label: Optional[float] = None) -> Data:
@@ -322,7 +359,7 @@ def process_cif_directory(
 
         # OOD check
         is_ood = ood_map.get(fname, bool(meta.get("ood_flag", False)))
-        if is_ood or "U" in fname or fname.startswith("SiC_doped_U"):
+        if is_ood or re.search(r"_doped_U_", fname):
             skip_ood += 1
             continue
 
@@ -390,7 +427,19 @@ def main(argv: Optional[List[str]] = None) -> None:
         default=CONFIG.graph_data_path,
         help="Output path for processed graph dataset file.",
     )
+    parser.add_argument(
+        "--refresh-descriptors",
+        action="store_true",
+        help="Only add or update the descriptor vector on the existing graph file (no CIFs needed).",
+    )
     args = parser.parse_args(argv)
+
+    if args.refresh_descriptors:
+        graphs = torch.load(args.output, weights_only=False)
+        attach_descriptors(graphs, CONFIG.references_csv_path, overwrite=True)
+        torch.save(graphs, args.output)
+        print(f"Updated descriptors on {len(graphs)} graph(s) in {args.output}")
+        return
 
     process_cif_directory(
         unrelaxed_dir=args.unrelaxed_dir,

@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from pymatgen.core import Element
 from sklearn.linear_model import Ridge
+from scipy.stats import spearmanr
 from sklearn.metrics import r2_score
 from sklearn.preprocessing import StandardScaler
 import torch
@@ -24,12 +25,15 @@ from src.data_pipeline.structures_to_graphs import (
     get_valence_electron_count,
     process_cif_directory,
 )
+from src.models.baselines import DescriptorModel
+from src.models.residual import ResidualDefectModel
 from src.models.train_gnn import (
     DopantGNN,
     EvaluationMetrics,
     evaluate,
     train_one_model,
 )
+from src.utils.descriptors import RICH_FEATURE_NAMES, rich_descriptor
 from src.utils.log import get_logger
 from src.utils.seed import set_seed
 
@@ -55,6 +59,7 @@ class SampleData:
     defect_graph: Data
     legacy_graph: Data
     descriptor: np.ndarray
+    rich: Optional[np.ndarray] = None
 
 
 def extract_dopant_descriptors(dopant_symbol: str, host: str) -> np.ndarray:
@@ -198,6 +203,13 @@ def prepare_dataset_items(
             legacy_g = build_legacy_fallback_graph(g)
 
         descriptor = extract_dopant_descriptors(dopant, host)
+        desc_attr = getattr(g, "desc", None)
+        if desc_attr is not None:
+            rich = desc_attr.view(-1).cpu().numpy().astype(np.float32)
+        else:
+            rich = rich_descriptor(dopant, host, site)
+            # Older graph files have no descriptor vector, add it so the GNN variants can run
+            g.desc = torch.tensor(rich, dtype=torch.float).unsqueeze(0)
 
         item = SampleData(
             filename=filename,
@@ -208,6 +220,7 @@ def prepare_dataset_items(
             defect_graph=g,
             legacy_graph=legacy_g,
             descriptor=descriptor,
+            rich=rich,
         )
         items.append(item)
 
@@ -346,6 +359,121 @@ def train_legacy_gcn(
     return model
 
 
+# Models added after the first benchmark. Row names in cv_metrics.csv:
+#   ridge_rich        ridge on the rich descriptors (alpha by grouped CV)
+#   gp_iso, gp_ard    Gaussian process on the rich descriptors
+#   defect_gnn_desc   DefectGNN without element embedding, descriptors in the readout
+#   residual_gnn      GP plus a small GNN trained on out-of-fold residuals
+EXTRA_MODELS = ["ridge_rich", "gp_iso", "gp_ard", "defect_gnn_desc", "residual_gnn"]
+DESC_GNN_KWARGS = {"use_embedding": False, "batch_norm": False, "dropout": 0.1}
+
+
+def _score(preds: np.ndarray, targets: np.ndarray) -> EvaluationMetrics:
+    """MAE, RMSE and R2 for arrays of predictions and targets."""
+    diff = preds - targets
+    r2 = float(r2_score(targets, preds)) if len(targets) > 1 and np.var(targets) > 1e-8 else 0.0
+    return EvaluationMetrics(
+        mae=float(np.mean(np.abs(diff))),
+        rmse=float(np.sqrt(np.mean(diff**2))),
+        r2=r2,
+        predictions=np.asarray(preds, dtype=np.float64),
+    )
+
+
+def fit_predict_extra_models(
+    train_items: List[SampleData],
+    test_items: List[SampleData],
+    epochs: int,
+    lr: float,
+    batch_size: int,
+    seed: int,
+    device: torch.device,
+    include_gnn: bool = True,
+) -> Dict[str, Tuple[np.ndarray, Optional[np.ndarray]]]:
+    """Fit the descriptor-based models and the descriptor-aware GNNs on one fold.
+
+    Returns {model name: (predictions, predictive std or None)}.
+    """
+    x_train = np.stack([s.rich for s in train_items]).astype(np.float64)
+    x_test = np.stack([s.rich for s in test_items]).astype(np.float64)
+    y_train = np.array([s.y for s in train_items], dtype=np.float64)
+    groups = np.array([s.dopant for s in train_items])
+
+    out: Dict[str, Tuple[np.ndarray, Optional[np.ndarray]]] = {}
+    for kind, name in (("ridge", "ridge_rich"), ("gp_iso", "gp_iso"), ("gp_ard", "gp_ard")):
+        mean, std = DescriptorModel(kind, seed=seed).fit(x_train, y_train, groups).predict(x_test)
+        out[name] = (mean, std)
+
+    if not include_gnn:
+        return out
+
+    train_def = [s.defect_graph for s in train_items]
+    test_def = [s.defect_graph for s in test_items]
+
+    net, _ = train_one_model(
+        train_graphs=train_def,
+        val_graphs=None,
+        epochs=epochs,
+        lr=lr,
+        weight_decay=1e-3,
+        batch_size=batch_size,
+        seed=seed,
+        hidden_dim=32,
+        device=device,
+        model_kwargs={**DESC_GNN_KWARGS, "global_dim": len(RICH_FEATURE_NAMES)},
+    )
+    ev = evaluate(net, test_def, y_mean=net.y_mean, y_std=net.y_std, device=device)
+    out["defect_gnn_desc"] = (ev.predictions, None)
+
+    residual = ResidualDefectModel(base="gp_iso", seed=seed, device=device).fit(train_def, x_train, groups)
+    res = residual.predict(test_def, x_test)
+    out["residual_gnn"] = (res["pred"], res["std"])
+    return out
+
+
+def _std_error_spearman(stds: np.ndarray, preds: np.ndarray, targets: np.ndarray) -> float:
+    """Spearman correlation between predictive std and absolute error (NaN if undefined)."""
+    err = np.abs(preds - targets)
+    if len(stds) < 3 or np.var(stds) < 1e-12 or np.var(err) < 1e-12:
+        return float("nan")
+    return float(spearmanr(stds, err).statistic)
+
+
+def record_extra_models_fold(
+    records: List[Dict[str, Any]],
+    preds_by_model: Dict[str, List[float]],
+    stds_by_model: Dict[str, List[float]],
+    cv_type: str,
+    fold_name: str,
+    train_items: List[SampleData],
+    test_items: List[SampleData],
+    epochs: int,
+    lr: float,
+    batch_size: int,
+    seed: int,
+    device: torch.device,
+    include_gnn: bool,
+) -> None:
+    """Run the extra models on one fold and append per-fold rows plus pooled bookkeeping."""
+    y_test = np.array([s.y for s in test_items], dtype=np.float64)
+    results = fit_predict_extra_models(
+        train_items, test_items, epochs, lr, batch_size, seed, device, include_gnn=include_gnn
+    )
+    for name, (preds, std) in results.items():
+        sc = _score(preds, y_test)
+        preds_by_model[name].extend(preds.tolist())
+        stds_by_model[name].extend(([float("nan")] * len(preds)) if std is None else std.tolist())
+        records.append({
+            "cv_type": cv_type,
+            "model": name,
+            "fold": fold_name,
+            "n_samples": len(test_items),
+            "mae_ev": sc.mae,
+            "rmse_ev": sc.rmse,
+            "r2": sc.r2,
+        })
+
+
 def run_lodo_cv(
     samples: List[SampleData],
     epochs: int = 50,
@@ -355,6 +483,8 @@ def run_lodo_cv(
     seed: int = 42,
     device: Optional[torch.device] = None,
     run_legacy: bool = True,
+    extra_models: bool = True,
+    include_extra_gnn: bool = True,
 ) -> Tuple[pd.DataFrame, Dict[str, np.ndarray], np.ndarray, Dict[str, Dict[str, float]]]:
     """Execute Leave-One-Dopant-Out cross validation across hosts and sites.
 
@@ -373,9 +503,12 @@ def run_lodo_cv(
     if run_legacy:
         models.append("legacy_gcn")
     models.append("defect_gnn")
+    if extra_models:
+        models.extend(EXTRA_MODELS if include_extra_gnn else EXTRA_MODELS[:3])
 
     records: List[Dict[str, Any]] = []
     preds_by_model: Dict[str, List[float]] = {m: [] for m in models}
+    stds_by_model: Dict[str, List[float]] = {m: [] for m in models}
     all_targets: List[float] = []
 
     for dopant in unique_dopants:
@@ -480,6 +613,12 @@ def run_lodo_cv(
             "r2": eval_defect.r2,
         })
 
+        if extra_models:
+            record_extra_models_fold(
+                records, preds_by_model, stds_by_model, "LODO", dopant, train_items, test_items,
+                epochs, lr, batch_size, seed, device, include_extra_gnn,
+            )
+
     # Compute pooled metrics and fold statistics
     targets_arr = np.array(all_targets, dtype=np.float64)
     pred_arrays: Dict[str, np.ndarray] = {}
@@ -502,6 +641,7 @@ def run_lodo_cv(
             "mae_ev": pooled_mae,
             "rmse_ev": pooled_rmse,
             "r2": pooled_r2,
+            "spearman_std_err": _std_error_spearman(np.array(stds_by_model[m], dtype=np.float64), p_arr, targets_arr),
         })
 
         fold_maes = [r["mae_ev"] for r in records if r["cv_type"] == "LODO" and r["model"] == m and r["fold"] != "pooled"]
@@ -526,6 +666,8 @@ def run_loho_cv(
     seed: int = 42,
     device: Optional[torch.device] = None,
     run_legacy: bool = True,
+    extra_models: bool = True,
+    include_extra_gnn: bool = True,
 ) -> Tuple[pd.DataFrame, Dict[str, np.ndarray], np.ndarray]:
     """Execute Leave-One-Host-Out exploratory transfer evaluation across host crystals."""
     set_seed(seed)
@@ -541,9 +683,12 @@ def run_loho_cv(
     if run_legacy:
         models.append("legacy_gcn")
     models.append("defect_gnn")
+    if extra_models:
+        models.extend(EXTRA_MODELS if include_extra_gnn else EXTRA_MODELS[:3])
 
     records: List[Dict[str, Any]] = []
     preds_by_model: Dict[str, List[float]] = {m: [] for m in models}
+    stds_by_model: Dict[str, List[float]] = {m: [] for m in models}
     all_targets: List[float] = []
 
     for host in unique_hosts:
@@ -648,6 +793,12 @@ def run_loho_cv(
             "r2": eval_defect.r2,
         })
 
+        if extra_models:
+            record_extra_models_fold(
+                records, preds_by_model, stds_by_model, "LOHO_exploratory", host, train_items, test_items,
+                epochs, lr, batch_size, seed, device, include_extra_gnn,
+            )
+
     targets_arr = np.array(all_targets, dtype=np.float64)
     pred_arrays: Dict[str, np.ndarray] = {}
 
@@ -667,6 +818,7 @@ def run_loho_cv(
             "mae_ev": pooled_mae,
             "rmse_ev": pooled_rmse,
             "r2": pooled_r2,
+            "spearman_std_err": _std_error_spearman(np.array(stds_by_model[m], dtype=np.float64), p_arr, targets_arr),
         })
 
     df_metrics = pd.DataFrame(records)
@@ -685,15 +837,26 @@ def plot_parity_lodo(
 
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
 
-    fig, axes = plt.subplots(2, 2, figsize=(10, 10))
-    axes_list = axes.flatten()
-
-    model_display = [
+    all_display = [
         ("mean_predictor", "Mean Predictor"),
         ("ridge_baseline", "Ridge Baseline (Descriptors + Host)"),
         ("legacy_gcn", "Legacy GCN (Isotropic)"),
         ("defect_gnn", "DefectGNN (Center Readout)"),
+        ("ridge_rich", "Ridge (Rich Descriptors)"),
+        ("gp_iso", "Gaussian Process (Isotropic Matern)"),
+        ("gp_ard", "Gaussian Process (ARD Matern)"),
+        ("defect_gnn_desc", "DefectGNN (Descriptor-Only)"),
+        ("residual_gnn", "GP + Residual GNN"),
     ]
+    # Only draw models that actually produced predictions for this run
+    model_display = [(k, n) for k, n in all_display if k in predictions]
+    n_models = max(1, len(model_display))
+    n_cols = 2 if n_models <= 4 else 3
+    n_rows = int(np.ceil(n_models / n_cols))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5 * n_cols, 5 * n_rows), squeeze=False)
+    axes_list = axes.flatten()
+    for extra_ax in axes_list[n_models:]:
+        extra_ax.axis("off")
 
     min_val = float(np.min(targets)) - 0.5 if len(targets) > 0 else -1.0
     max_val = float(np.max(targets)) + 0.5 if len(targets) > 0 else 1.0
@@ -759,6 +922,19 @@ def compute_plain_verdict(fold_summaries: Dict[str, Dict[str, float]]) -> str:
             f"Verdict: DefectGNN does not beat the ridge baseline by more than the "
             f"fold-to-fold standard deviation (difference: {margin:.4f} eV, fold std: {fold_std:.4f} eV)."
         )
+
+
+def compute_best_model_verdict(fold_summaries: Dict[str, Dict[str, float]]) -> str:
+    """Name the model with the lowest mean fold MAE and say how it compares with ridge and the GNN."""
+    scored = {m: v["mean_mae"] for m, v in fold_summaries.items() if not np.isnan(v.get("mean_mae", np.nan))}
+    if not scored:
+        return "Verdict: no fold scores available."
+    best = min(scored, key=scored.get)
+    parts = [f"Lowest mean fold MAE: {best} ({scored[best]:.4f} eV)."]
+    for ref in ("ridge_baseline", "defect_gnn"):
+        if ref in scored and ref != best:
+            parts.append(f"{ref}: {scored[ref]:.4f} eV.")
+    return " ".join(parts)
 
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -827,6 +1003,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         help="Global random seed.",
     )
     parser.add_argument(
+        "--skip-extra-models",
+        action="store_true",
+        help="Skip ridge_rich, GP, descriptor-only GNN and residual GNN rows.",
+    )
+    parser.add_argument(
         "--skip-legacy-gcn",
         action="store_true",
         help="Skip legacy isotropic GCN baseline execution.",
@@ -863,6 +1044,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         seed=args.seed,
         device=device,
         run_legacy=not args.skip_legacy_gcn,
+        extra_models=not args.skip_extra_models,
     )
 
     # 3. Leave-One-Host-Out Exploratory Cross Validation
@@ -876,6 +1058,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         seed=args.seed,
         device=device,
         run_legacy=not args.skip_legacy_gcn,
+        extra_models=not args.skip_extra_models,
     )
 
     # Combine metrics and save CSV
@@ -901,6 +1084,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     # 6. Final one-line verdict
     verdict = compute_plain_verdict(lodo_summaries)
     print(f"\n{verdict}")
+    print(compute_best_model_verdict(lodo_summaries))
 
 
 if __name__ == "__main__":

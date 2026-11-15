@@ -22,7 +22,7 @@ def test_manifest_valid_status_values():
     assert os.path.exists(manifest_path), f"Manifest file missing at {manifest_path}"
 
     df = pd.read_csv(manifest_path)
-    valid_statuses = {"unrelaxed", "relaxed", "candidate"}
+    valid_statuses = {"unrelaxed", "relaxed", "candidate", "needs_regeneration"}
     actual_statuses = set(df["status"].dropna().unique())
 
     assert actual_statuses.issubset(valid_statuses), (

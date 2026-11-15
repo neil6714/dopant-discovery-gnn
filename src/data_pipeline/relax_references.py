@@ -54,6 +54,7 @@ def relax_references(
     steps: Optional[int] = None,
     force: bool = False,
     only: Optional[str] = None,
+    only_unconverged: bool = False,
 ) -> List[Dict[str, Any]]:
     """Relax host primitive cells and elemental references with lattice optimization.
 
@@ -66,6 +67,8 @@ def relax_references(
         steps: Maximum optimization steps.
         force: Whether to re-relax references even if already present.
         only: Substring filter to selectively process names.
+        only_unconverged: Redo only the entries flagged unconverged in output_csv, starting
+            from their last relaxed structure and with twice the step budget.
 
     Returns:
         List of reference energy records.
@@ -77,6 +80,15 @@ def relax_references(
 
     os.makedirs(relaxed_hosts_dir, exist_ok=True)
     os.makedirs(relaxed_refs_dir, exist_ok=True)
+
+    redo_names = None
+    if only_unconverged:
+        if not os.path.exists(output_csv):
+            raise FileNotFoundError(f"{output_csv} not found, nothing to re-relax.")
+        existing = pd.read_csv(output_csv)
+        redo_names = set(existing.loc[~existing["converged"].astype(bool), "name"].astype(str))
+        steps = steps * 2
+        logger.info("Re-relaxing %d unconverged entr(ies): %s", len(redo_names), sorted(redo_names))
 
     source_ids = load_source_material_ids(os.path.join(raw_dir, "references", "sources.csv"))
 
@@ -95,6 +107,8 @@ def relax_references(
     # 1. Relax host primitive cells
     for host_name, host_def in CONFIG.hosts.items():
         if only and only not in host_name:
+            continue
+        if redo_names is not None and host_name not in redo_names:
             continue
 
         raw_cif = os.path.join(raw_dir, f"{host_name}_base.cif")
@@ -148,6 +162,7 @@ def relax_references(
                 "e_per_atom_ev": res.energy_per_atom,
                 "n_atoms": len(res.final_structure),
                 "converged": res.converged,
+                "max_force": res.max_force,
                 "source_material_id": source_id,
             }
         )
@@ -160,9 +175,13 @@ def relax_references(
             el_name = os.path.splitext(rfile)[0]
             if only and only not in el_name:
                 continue
+            if redo_names is not None and el_name not in redo_names:
+                continue
 
             raw_cif = os.path.join(raw_refs_dir, rfile)
             out_cif = os.path.join(relaxed_refs_dir, rfile)
+            if redo_names is not None and os.path.exists(out_cif):
+                raw_cif = out_cif  # continue from where the previous run stopped
             source_id = source_ids.get(el_name, "")
 
             logger.info("Relaxing elemental reference %s with lattice relaxation...", el_name)
@@ -201,6 +220,7 @@ def relax_references(
                     "e_per_atom_ev": res.energy_per_atom,
                     "n_atoms": len(res.final_structure),
                     "converged": res.converged,
+                    "max_force": res.max_force,
                     "source_material_id": source_id,
                 }
             )
@@ -276,6 +296,11 @@ def main(argv: Optional[List[str]] = None) -> None:
         default=None,
         help="Selectively process structures containing this substring.",
     )
+    parser.add_argument(
+        "--rerelax-unconverged",
+        action="store_true",
+        help="Redo only references flagged unconverged in the CSV, with a doubled step budget.",
+    )
     args = parser.parse_args(argv)
 
     relax_references(
@@ -287,6 +312,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         steps=args.steps,
         force=args.force,
         only=args.only,
+        only_unconverged=args.rerelax_unconverged,
     )
 
 

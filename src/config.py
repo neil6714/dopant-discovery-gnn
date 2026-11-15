@@ -1,6 +1,6 @@
 """Central configuration dataclass for the dopant discovery pipeline."""
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Any, Dict, List
 
 
 @dataclass(frozen=True)
@@ -87,13 +87,30 @@ class Config:
     train_epochs: int = 50
     ensemble_epochs: int = 30
     num_ensemble_models: int = 5
-    uncertainty_threshold: float = 0.05
+    # Screening cutoff in eV on ensemble std. The old 0.05 eV was below the ensemble std of
+    # nearly every candidate (about 0.3 to 0.6 eV at this data size), so it never discriminated.
+    uncertainty_threshold: float = 0.25
     train_split: float = 0.8
+
+    # Non-transition-metal dopants. The 24 transition metals alone leave the model with one
+    # chemistry family, so held-out elements are far from everything seen in training.
+    extra_dopants: List[str] = field(default_factory=lambda: ["Be", "Mg", "Ca", "Al", "Ge", "Sn", "Sc", "Y"])
+    include_extra_dopants: bool = True
+
+    # Ensemble members use the descriptor-aware DefectGNN (no element embedding, mu_dopant in
+    # the readout) whenever the graphs carry data.desc.
+    use_descriptor_gnn: bool = True
+    descriptor_gnn_kwargs: Dict[str, Any] = field(
+        default_factory=lambda: {"use_embedding": False, "global_dim": 15, "batch_norm": False, "dropout": 0.1}
+    )
 
     @property
     def training_dopants(self) -> List[str]:
-        """Return combined list of 3d, 4d, and 5d dopants for training."""
-        return self.dopants_3d + self.dopants_4d + self.dopants_5d
+        """Return the dopant list used for training (3d, 4d, 5d and optional extras)."""
+        base = self.dopants_3d + self.dopants_4d + self.dopants_5d
+        if self.include_extra_dopants:
+            base = base + [d for d in self.extra_dopants if d not in base]
+        return base
 
 
 # Global default configuration instance
