@@ -41,19 +41,25 @@ where:
 - $\mu_D$ is the dopant chemical potential (eV/atom).
 
 #### Chemical Potential Boundaries (Cation-Rich Limit)
-Chemical potentials represent the reservoir conditions during synthesis. To prevent the host or dopants from precipitating into bulk elemental crystals, chemical potentials have thermodynamic bounds:
-- **4H-SiC**: Under compound equilibrium, the cation-rich (Si-rich) limit fixes:
-  $$
-  \mu_{\text{Si}} + \mu_{\text{C}} = \mu_{\text{SiC}} \implies \mu_{\text{Si}} = \mu_{\text{Si(bulk)}}, \quad \mu_{\text{C}} = \mu_{\text{SiC(bulk)}} - \mu_{\text{Si(bulk)}}
-  $$
-- **GaN**: Under compound equilibrium, the cation-rich (Ga-rich) limit fixes:
-  $$
-  \mu_{\text{Ga}} + \mu_{\text{N}} = \mu_{\text{GaN}} \implies \mu_{\text{Ga}} = \mu_{\text{Ga(bulk)}}, \quad \mu_{\text{N}} = \mu_{\text{GaN(bulk)}} - \mu_{\text{Ga(bulk)}}
-  $$
-- **Dopant**: The upper solubility limit before pure dopant phase segregation is set by its bulk elemental ground state:
-  $$
-  \mu_D = \mu_{D\text{(bulk)}}
-  $$
+Chemical potentials represent the reservoir conditions during synthesis. To prevent the host or dopants from precipitating into bulk elemental crystals, chemical potentials have thermodynamic bounds.
+
+For **4H-SiC**, compound equilibrium sets the cation-rich (Si-rich) limit:
+
+$$
+\mu_{\text{Si}} + \mu_{\text{C}} = \mu_{\text{SiC}} \implies \mu_{\text{Si}} = \mu_{\text{Si(bulk)}}, \quad \mu_{\text{C}} = \mu_{\text{SiC(bulk)}} - \mu_{\text{Si(bulk)}}
+$$
+
+For **GaN**, compound equilibrium sets the cation-rich (Ga-rich) limit:
+
+$$
+\mu_{\text{Ga}} + \mu_{\text{N}} = \mu_{\text{GaN}} \implies \mu_{\text{Ga}} = \mu_{\text{Ga(bulk)}}, \quad \mu_{\text{N}} = \mu_{\text{GaN(bulk)}} - \mu_{\text{Ga(bulk)}}
+$$
+
+For the **dopant**, the upper solubility limit before pure elemental phase segregation is:
+
+$$
+\mu_D = \mu_{D\text{(bulk)}}
+$$
 
 ### 1.3 Role of Machine-Learned Interatomic Potentials (CHGNet)
 Density Functional Theory (DFT) calculations on 216-atom supercells are computationally expensive, taking hours per structure. In this project, we use CHGNet (Crystal Hamiltonian Graph Neural Network) as our atomistic simulation engine. CHGNet is a universal machine-learned interatomic potential trained on over 1.5 million Materials Project DFT calculations. It predicts total energies, interatomic forces, and stress tensors directly from atomic structures in seconds.
