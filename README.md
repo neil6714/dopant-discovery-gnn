@@ -42,9 +42,18 @@ where:
 
 #### Chemical Potential Boundaries (Cation-Rich Limit)
 Chemical potentials represent the reservoir conditions during synthesis. To prevent the host or dopants from precipitating into bulk elemental crystals, chemical potentials have thermodynamic bounds:
-- **4H-SiC**: Under $\mu_{\mathrm{Si}} + \mu_{\mathrm{C}} = \mu_{\mathrm{SiC(bulk)}}$, the cation-rich (Si-rich) limit fixes $\mu_{\mathrm{Si}} = \mu_{\mathrm{Si(bulk)}}$ (diamond cubic Si, mp-149) and $\mu_{\mathrm{C}} = \mu_{\mathrm{SiC(bulk)}} - \mu_{\mathrm{Si(bulk)}}$.
-- **GaN**: Under $\mu_{\mathrm{Ga}} + \mu_{\mathrm{N}} = \mu_{\mathrm{GaN(bulk)}}$, the cation-rich (Ga-rich) limit fixes $\mu_{\mathrm{Ga}} = \mu_{\mathrm{Ga(bulk)}}$ (orthorhombic Ga, mp-142) and $\mu_{\mathrm{N}} = \mu_{\mathrm{GaN(bulk)}} - \mu_{\mathrm{Ga(bulk)}}$.
-- **Dopant**: The upper solubility limit before pure dopant phase segregation is set by its bulk elemental ground state: $\mu_D = \mu_{D\mathrm{(bulk)}}$.
+- **4H-SiC**: Under compound equilibrium, the cation-rich (Si-rich) limit fixes:
+  $$
+  \mu_{\text{Si}} + \mu_{\text{C}} = \mu_{\text{SiC}} \implies \mu_{\text{Si}} = \mu_{\text{Si(bulk)}}, \quad \mu_{\text{C}} = \mu_{\text{SiC(bulk)}} - \mu_{\text{Si(bulk)}}
+  $$
+- **GaN**: Under compound equilibrium, the cation-rich (Ga-rich) limit fixes:
+  $$
+  \mu_{\text{Ga}} + \mu_{\text{N}} = \mu_{\text{GaN}} \implies \mu_{\text{Ga}} = \mu_{\text{Ga(bulk)}}, \quad \mu_{\text{N}} = \mu_{\text{GaN(bulk)}} - \mu_{\text{Ga(bulk)}}
+  $$
+- **Dopant**: The upper solubility limit before pure dopant phase segregation is set by its bulk elemental ground state:
+  $$
+  \mu_D = \mu_{D\text{(bulk)}}
+  $$
 
 ### 1.3 Role of Machine-Learned Interatomic Potentials (CHGNet)
 Density Functional Theory (DFT) calculations on 216-atom supercells are computationally expensive, taking hours per structure. In this project, we use CHGNet (Crystal Hamiltonian Graph Neural Network) as our atomistic simulation engine. CHGNet is a universal machine-learned interatomic potential trained on over 1.5 million Materials Project DFT calculations. It predicts total energies, interatomic forces, and stress tensors directly from atomic structures in seconds.
@@ -97,8 +106,8 @@ $$
 
 with centers $\mu_k$ spaced from $0.5\text{ \AA}$ to $4.5\text{ \AA}$ and $\gamma = 1 / (2 \sigma^2)$.
 
-4. **Node features ($\mathbf{x}_i \in \mathbb{R}^9$)**: Scaled Pauling electronegativity ($\chi / 4.0$), covalent radius ($r_{\mathrm{cov}} / 2.5\text{ \AA}$), periodic group ($G / 18.0$), period ($P / 7.0$), valence electrons ($V / 14.0$), a binary dopant indicator ($I_{\mathrm{dopant}} \in \{0, 1\}$), and a host one-hot indicator ($[1, 0]$ for SiC, $[0, 1]$ for GaN).
-5. **Global descriptors ($\mathbf{g} \in \mathbb{R}^{15}$)**: For models incorporating global chemistry, $\mathbf{g}$ includes elemental properties of the dopant and host cation, their differences ($\Delta \chi$, $\Delta r_{\mathrm{cov}}$), the dopant chemical potential $\mu_D$, and the host indicator.
+4. **Node features** ($\mathbf{x}_i \in \mathbb{R}^9$): Scaled Pauling electronegativity ($\chi / 4.0$), covalent radius ($r / 2.5\text{ \AA}$), periodic group ($G / 18.0$), period ($P / 7.0$), valence electrons ($V / 14.0$), a binary dopant indicator (1 for dopant, 0 for host), and a host one-hot indicator ([1, 0] for SiC, [0, 1] for GaN).
+5. **Global descriptors** ($\mathbf{g} \in \mathbb{R}^{15}$): Combines elemental properties of the dopant and host cation, electronegativity difference $\Delta \chi$, radius difference $\Delta r$, the dopant chemical potential $\mu_D$, and the host crystal indicator.
 
 ### 2.3 Message Passing and Center Readout
 Message passing uses Crystal Graph Convolution (CGConv) layers operating with continuous edge vectors:
@@ -111,7 +120,7 @@ $$
 \mathbf{x}_i^{(l+1)} = \mathbf{x}_i^{(l)} + \sum_{j \in \mathcal{N}(i)} \sigma\left( \mathbf{W}_{\text{f}} \, \mathbf{z}_{ij} + \mathbf{b}_{\text{f}} \right) \odot g\left( \mathbf{W}_{\text{s}} \, \mathbf{z}_{ij} + \mathbf{b}_{\text{s}} \right)
 $$
 
-where $\sigma$ is the sigmoid gate, $g$ is Softplus, and $\mathbf{W}_{\text{f}}, \mathbf{W}_{\text{s}}$ are learned weight matrices.
+Here, $\sigma(\cdot)$ is the element-wise sigmoid gate, $g(\cdot)$ is the Softplus activation, and $\mathbf{W}$ and $\mathbf{b}$ are learned layer weights and biases.
 
 The center-focused readout concatenates the final central dopant node representation with the average cluster representation:
 
@@ -147,7 +156,7 @@ Structures, status flags, and paths are tracked in [data/manifest.csv](data/mani
 | `unrelaxed_path` | string | Relative path to unrelaxed CIF |
 | `relaxed_path` | string | Relative path to CHGNet relaxed CIF |
 
-The dataset spans 33 dopants: 25 transition metals (3d, 4d, 5d), 7 main-group elements (Al, Ca, Ge, Mg, Sn, Be, Cd), and 1 actinide (U) across 4H-SiC ($2b_0$, $2a_1$) and GaN ($2b_0$), totaling 99 training/evaluation defect structures and 2 candidate configurations.
+The dataset spans 33 dopants: 25 transition metals (3d, 4d, 5d), 7 main-group elements (Al, Ca, Ge, Mg, Sn, Be, Cd), and 1 actinide (U) across 4H-SiC (`2b_0`, `2a_1`) and GaN (`2b_0`), totaling 99 training/evaluation defect structures and 2 candidate configurations.
 
 ### 3.2 Data Cleaning and Archival
 An earlier version of the pipeline had two issues:
@@ -199,13 +208,13 @@ $$
 The standard deviation $\sigma_{\mathrm{ens}}$ measures how much the ensemble members disagree, giving an estimate of model uncertainty in eV.
 
 ### 5.2 Active Learning Benchmark and Live Loop
-The simulated pool benchmark (`src.models.active_learning --benchmark`) starts from 6 labeled structures and acquires batches of 4 candidates over 5 steps, comparing greedy uncertainty sampling (highest $\sigma_{\mathrm{ens}}$) against random selection on held-out dopant clusters. In the live autonomous script ([autonomous_lab.py](autonomous_lab.py)), candidate structures with uncertainty above 0.25 eV trigger automated CHGNet relaxation before logging and model retraining.
+The simulated pool benchmark (`src.models.active_learning --benchmark`) starts from 6 labeled structures and acquires batches of 4 candidates over 5 steps, comparing greedy uncertainty sampling (highest ensemble standard deviation) against random selection on held-out dopant clusters. In the live autonomous script ([autonomous_lab.py](autonomous_lab.py)), candidate structures with uncertainty above 0.25 eV trigger automated CHGNet relaxation before logging and model retraining.
 
 ---
 
 ## 6. Results and Discussion
 
-> **Data Integrity Notice.** All numbers below reflect the corrected dataset (99 defect structures across 33 dopants, 40 converged elemental references, and both SiC $2b_0$ and $2a_1$ sites verified distinct) executed on an Nvidia Tesla T4 GPU on Google Colab.
+> **Data Integrity Notice.** All numbers below reflect the corrected dataset (99 defect structures across 33 dopants, 40 converged elemental references, and both SiC `2b_0` and `2a_1` sites verified distinct) executed on an Nvidia Tesla T4 GPU on Google Colab.
 
 ### 6.1 Leave-One-Dopant-Out (LODO) Benchmark
 Out-of-fold test metrics across 99 defect structures (33 dopant folds):
@@ -267,7 +276,7 @@ There are clear physical and data reasons for this:
 ### 6.5 Active Learning Benchmark
 The pool benchmark evaluated uncertainty sampling against uniform random selection over 3 repeats:
 
-| Acquisition Step | Train Count ($N_{\mathrm{train}}$) | Remainder Pool ($N_{\mathrm{rem}}$) | Held-out Dopants ($N_{\mathrm{heldout}}$) | Uncertainty Acquisition Held-out MAE (eV) | Random Acquisition Held-out MAE (eV) | Uncertainty Pool MAE (eV) | Random Pool MAE (eV) |
+| Acquisition Step | Training Count ($N$) | Remainder Pool | Held-out Dopants | Uncertainty Acquisition Held-out MAE (eV) | Random Acquisition Held-out MAE (eV) | Uncertainty Pool MAE (eV) | Random Pool MAE (eV) |
 | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
 | Step 0 (Seed) | 6 | 69 | 24 | 1834.78 | 1898.36 | 973.99 | 985.84 |
 | Step 1 | 10 | 65 | 24 | 2.4660 | 784.76 | 2.2804 | 838.55 |
@@ -279,14 +288,14 @@ The pool benchmark evaluated uncertainty sampling against uniform random selecti
 Because entire elements are held out, uncertainty sampling picks chemically unfamiliar outliers first. In very early steps with small training sets, this causes higher variance until key chemical families are sampled. Early uncertainty calibration is positive, with rank correlation between ensemble standard deviation and actual error reaching $\rho = 0.973$ ($p < 10^{-14}$) at step 0. Trajectories are stored in [results/al_benchmark.csv](results/al_benchmark.csv) and [results/uncertainty_calibration.csv](results/uncertainty_calibration.csv).
 
 ### 6.6 Candidate Screening and Uranium Relaxation
-The autonomous screening script ([autonomous_lab.py](autonomous_lab.py)) screened Uranium (U) substitutions in 4H-SiC across both Wyckoff sites ($2a_1$ and $2b_0$):
+The autonomous screening script ([autonomous_lab.py](autonomous_lab.py)) screened Uranium (U) substitutions in 4H-SiC across both Wyckoff sites (`2a_1` and `2b_0`):
 
-| Candidate CIF | Host | Dopant | Wyckoff Site | Predicted $E_{\mathrm{f}}$ (eV) | Initial Ensemble $\sigma_{\mathrm{ens}}$ (eV) | CHGNet Simulated $E_{\mathrm{f}}$ (eV) | Out-of-Sample Error (eV) |
+| Candidate CIF | Host | Dopant | Wyckoff Site | Predicted Formation Energy (eV) | Initial Ensemble Uncertainty (eV) | CHGNet Simulated Energy (eV) | Out-of-Sample Error (eV) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| `SiC_doped_U_2a_1.cif` | SiC | U | $2a_1$ (quasi-cubic) | 1.9973 | 0.5778 | 1.1428 | 0.8545 |
-| `SiC_doped_U_2b_0.cif` | SiC | U | $2b_0$ (quasi-hexagonal) | 1.9973 | 0.5778 | 1.1428 | 0.8545 |
+| `SiC_doped_U_2a_1.cif` | SiC | U | 2a (quasi-cubic) | 1.9973 | 0.5778 | 1.1428 | 0.8545 |
+| `SiC_doped_U_2b_0.cif` | SiC | U | 2b (quasi-hexagonal) | 1.9973 | 0.5778 | 1.1428 | 0.8545 |
 
-Both candidates initially had high ensemble uncertainty ($\sigma_{\mathrm{ens}} = 0.5778\text{ eV}$, well above the 0.25 eV cutoff), triggering automatic CHGNet relaxation. After adding them to the dataset and retraining, ensemble uncertainty dropped to $0.0788\text{ eV}$, well below the screening threshold. Out-of-sample logs are in [results/live_al_log.csv](results/live_al_log.csv).
+Both candidates initially had high ensemble uncertainty (standard deviation of 0.5778 eV, well above the 0.25 eV cutoff), triggering automatic CHGNet relaxation. After adding them to the dataset and retraining, ensemble uncertainty dropped to 0.0788 eV, well below the screening threshold. Out-of-sample logs are recorded in [results/live_al_log.csv](results/live_al_log.csv).
 
 ---
 
@@ -408,10 +417,10 @@ python autonomous_lab.py
 1. **CHGNet Accuracy on Actinides**: CHGNet is trained mostly on common inorganic compounds. Its accuracy is lower on localized 5f electron systems like Uranium. Actinide formation energies should be treated as exploratory.
 2. **Neutral Defects Only**: We only calculate neutral charge states ($q = 0$). In actual semiconductors, defects often carry charges depending on the Fermi level, which requires charge transition levels and image charge corrections.
 3. **Implicit Spin**: Magnetic transition metals (Fe, Co, Ni, Mn, Cr) have complex spin ground states. CHGNet handles magnetic moments implicitly, but individual spin configurations were not checked against spin-polarized DFT+U.
-4. **Substitutional Cation Defects Only**: We only model single substitutional dopants on cation sites ($D_{\mathrm{Si}}$ in SiC, $D_{\mathrm{Ga}}$ in GaN). Interstitial atoms, vacancies, and defect pairs are not included.
+4. **Substitutional Cation Defects Only**: We only model single substitutional dopants on cation sites (dopant replacing Si in 4H-SiC, or dopant replacing Ga in GaN). Interstitials, vacancies, and defect complexes are not included.
 5. **Fixed-Cell Relaxation**: Supercell vectors are clamped to the host lattice during relaxation. This stops the box from distorting artificially, but misses long-range elastic expansion that occurs in real crystals.
 6. **Dataset Size and Host Transfer**: The dataset covers 33 dopants in 2 host crystals (99 structures). Host transfer results are exploratory because there are only two hosts.
-7. **Chemical Potential Dominance**: Formation energy contains $-\mu_D$, so much of its variation comes directly from the dopant's bulk cohesive energy. Models that do not see $\mu_D$ explicitly have to infer it from atomic identity alone.
+7. **Chemical Potential Dominance**: Defect formation energy directly subtracts the dopant chemical potential $\mu_D$, so a major part of the variation across dopants comes from the dopant bulk cohesive energy. Models without explicit chemical potential descriptors must infer this reference energy from elemental identity alone.
 
 ---
 
